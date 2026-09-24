@@ -45,3 +45,8 @@ def send_signup_code(to: str, code: str, minutes: int) -> bool:
     return _send(to, "Crea tu cuenta del portal de pacientes · HSLV",
                  f"Tu código para crear la cuenta es {code}. Vence en {minutes} minutos y sirve una sola vez.\n\n"
                  "Si no fuiste tú, ignora este mensaje.")
+
+
+def send_text(to: str, subject: str, body: str) -> bool:
+    """Correo simple (p. ej. la cita para registrarse). False si no hay SMTP configurado."""
+    return _send(to, subject, body)

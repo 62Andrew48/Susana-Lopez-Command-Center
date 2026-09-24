@@ -16,6 +16,8 @@ import pandas as pd
 import streamlit as st
 
 import clinical_records as cr
+import config
+import requests_service as rq
 import scheduling as sch
 from ui import context as ctx
 from ui.theme import BORDER, MUTED, TEXT, banner, chip, esc, section_title
@@ -109,12 +111,100 @@ def page_atencion() -> None:
     if ctx.can("citas.agenda"):
         tabs.append("Mi agenda"); views.append(_doctor_agenda)
     if ctx.can("citas.gestionar"):
-        tabs += ["Agendar cita", "Citas del día"]; views += [_book_tab, _day_tab]
+        n = len(rq.pending_requests(ctx.get_clin()))
+        tabs += [f"Solicitudes de pacientes ({n})" if n else "Solicitudes de pacientes", "Agendar cita",
+                 "Citas del día"]
+        views += [_requests_tab, _book_tab, _day_tab]
     if ctx.can("citas.gestionar"):  # la fila general y la pantalla de sala son de facturación/admisiones
         tabs += ["Fila de turnos", "Pantalla de turnos"]; views += [_queue_tab, _screen]
     for tab, view in zip(st.tabs(tabs), views):
         with tab:
             view()
+
+
+def _slot_ok(ts: str, pref: str) -> bool:
+    hour = int(ts[11:13])
+    return pref == "CUALQUIERA" or (pref == "MANANA" and hour < 12) or (pref == "TARDE" and hour >= 12)
+
+
+def _requests_tab() -> None:
+    """Facturación: solicitudes que mandan los pacientes (portal o asistente). Agendar y avisar por WhatsApp."""
+    clin = ctx.get_clin()
+    done = st.session_state.pop("sol_done", None)
+    if done:
+        banner(f"<b>Cita agendada</b> para {esc(done['paciente'])}: {esc(done['cuando'])}. Avísale por WhatsApp.", "ok")
+        if done["link"]:
+            st.link_button("Enviar confirmación por WhatsApp", done["link"], icon=":material/chat:", type="primary")
+        else:
+            st.caption("El paciente no tiene un celular válido registrado; la cita ya le aparece en su portal.")
+    rows = rq.pending_requests(clin)
+    if not rows:
+        st.info("No hay solicitudes pendientes. Llegan cuando un paciente pide cita desde el portal o el asistente.")
+        return
+    st.caption("Lee qué le pasa al paciente, agéndale con el profesional adecuado y escríbele por WhatsApp. "
+               "Si no hace falta cita (o debe ir por otra vía), respóndele sin agendar: lo verá en su portal.")
+    specs = sch.specialties(clin)
+    for r in rows:
+        waited = (datetime.strptime(ctx.clock(), sch.FMT) - datetime.strptime(r["creada_en"], sch.FMT))
+        hours = int(waited.total_seconds() // 3600)
+        with st.container(border=True):
+            flags = chip("Posible urgencia", "danger") if rq.is_emergency(r["sintomas"]) else ""
+            st.markdown(f"**{esc(r['paciente'])}** · {esc(r['tipo_documento'] or '')} {esc(r['numero_documento'] or '')} "
+                        f"· {chip(rq.TYPES[r['tipo']], 'info')} {chip(rq.PREFERENCES[r['preferencia']], 'neutral')} "
+                        f"{chip('por el asistente' if r['canal'] == 'ASISTENTE' else 'por el portal', 'neutral')} "
+                        f"{flags}<br><span class='muted'>Hace {hours} h · Contacto: {esc(r['contacto'] or 'sin teléfono')}"
+                        f"{' · contactado ' + _ts(r['contactado_en']) if r['contactado_en'] else ''}</span><br>"
+                        f"“{esc(r['sintomas'])}”", unsafe_allow_html=True)
+            link = rq.whatsapp_link(r["contacto"], rq.whatsapp_message(r))
+            a, b, c = st.columns(3)
+            if link:
+                a.link_button("Escribir por WhatsApp", link, icon=":material/chat:", width="stretch")
+                if b.button("Marcar contactado", key=f"solc_{r['id']}", width="stretch", disabled=bool(r["contactado_en"])):
+                    rq.mark_contacted(clin, r["id"], ctx.clock())
+                    st.rerun()
+            else:
+                a.caption("Sin celular válido para WhatsApp")
+            with c.popover("Responder sin agendar", width="stretch"):
+                answer = st.text_area("Respuesta para el paciente", key=f"sola_{r['id']}",
+                                      placeholder="Ej.: acérquese a consulta externa el lunes a las 7:00 con su documento")
+                if st.button("Enviar respuesta", key=f"solr_{r['id']}"):
+                    try:
+                        rq.close_request(clin, r["id"], respuesta=answer, by=ctx.user_id(), now=ctx.clock())
+                        st.rerun()
+                    except sqlite3.IntegrityError as exc:
+                        st.error(str(exc))
+            with st.expander("Agendar la cita", icon=":material/event_available:"):
+                default = rq.suggested_specialty(r, specs)
+                k1, k2 = st.columns(2)
+                spec = k1.selectbox("Especialidad", specs, index=specs.index(default), format_func=lambda x: x.title(),
+                                    key=f"sols_{r['id']}")
+                motivo = k2.selectbox("Tipo de cita", list(sch.MOTIVOS), format_func=sch.MOTIVOS.get,
+                                      index=1 if r["tipo"] in ("CONTROL", "RESULTADOS") else 0, key=f"solm_{r['id']}")
+                options = [_today() + timedelta(days=i) for i in range(14)]
+                day = st.pills("Día", options, format_func=_day_label, default=options[0], key=f"sold_{r['id']}")
+                if day is None:
+                    continue
+                slots = [x for x in sch.free_slots(clin, especialidad=spec, day=day.isoformat(), now=ctx.clock())
+                         if _slot_ok(x["fecha_hora"], r["preferencia"])]
+                if not slots:
+                    st.caption(f"Sin cupos ese día {rq.PREFERENCES[r['preferencia']].lower()}. Prueba otro día.")
+                    continue
+                labels = {f"{x['fecha_hora']}|{x['medico_id']}": f"{x['fecha_hora'][11:16]} · {x['medico']}"
+                          for x in slots}
+                pick = st.pills("Hora", list(labels), format_func=labels.get, key=f"solh_{r['id']}")
+                if st.button("Agendar y preparar WhatsApp", type="primary", disabled=pick is None,
+                             key=f"solg_{r['id']}", icon=":material/event_available:"):
+                    when, medico = pick.split("|")
+                    try:
+                        cita_id = rq.schedule_request(clin, r["id"], medico_id=int(medico), fecha_hora=when,
+                                                      motivo=motivo, by=ctx.user_id(), now=ctx.clock())
+                        cita = next(x for x in sch.appointments(clin, day_from=when[:10], day_to=when[:10],
+                                                                id_paciente=r["id_paciente"]) if x["id"] == cita_id)
+                        st.session_state.sol_done = {"paciente": r["paciente"], "cuando": f"{_ts(when)} con {cita['medico']}",
+                                                     "link": rq.whatsapp_link(r["contacto"], rq.whatsapp_message(r, cita))}
+                        st.rerun()
+                    except sqlite3.IntegrityError as exc:
+                        st.error(str(exc))
 
 
 def _book_tab() -> None:
@@ -293,6 +383,42 @@ def patient_ticket_banner(id_paciente: int) -> None:
                     f'<small>Tomado a las {t["creado_en"][11:16]}</small></div></div>', unsafe_allow_html=True)
 
 
+ROW_COLORS = {"CUMPLIDA": "background-color:#DCFCE7;color:#14532D", "NO_ASISTIO": "background-color:#FEE2E2;color:#7F1D1D",
+              "CANCELADA": "color:#6B7280"}      # PROGRAMADA: sin color (activa, aún no ha ido)
+
+
+def colored_history(rows) -> None:
+    """Historial de citas con colores: verde atendida, rojo no asistió, gris cancelada, sin color pendiente."""
+    df = pd.DataFrame([{"Fecha": _ts(c["fecha_hora"]), "Especialidad": c["especialidad"].title(),
+                        "Profesional": c["medico"], "Estado": STATE[c["estado"]][0], "_e": c["estado"]} for c in rows])
+    styles = df["_e"].map(lambda e: ROW_COLORS.get(e, ""))
+    styled = df.drop(columns="_e").style.apply(lambda r: [styles[r.name]] * len(r), axis=1)
+    st.markdown(" ".join([chip("Atendida", "ok"), chip("Programada", "neutral"), chip("No asistió", "danger"),
+                          chip("Cancelada", "neutral")]), unsafe_allow_html=True)
+    st.dataframe(styled, hide_index=True, width="stretch", height=min(38 * (len(df) + 1), 380))
+
+
+def _request_form(clin, id_paciente: int) -> None:
+    """El paciente cuenta qué le pasa; facturación le agenda y le escribe (no elige médico ni hora)."""
+    patient = cr.get_patient(clin, id_paciente)
+    with st.form("sol_cita", clear_on_submit=True):
+        tipo = st.selectbox("¿Qué necesitas?", list(rq.TYPES), format_func=rq.TYPES.get)
+        sintomas = st.text_area("Cuéntanos qué te pasa", placeholder="Ej.: tengo tos y fiebre desde hace 3 días",
+                                max_chars=600)
+        c1, c2 = st.columns(2)
+        pref = c1.selectbox("¿Cuándo puedes ir?", list(rq.PREFERENCES), format_func=rq.PREFERENCES.get, index=2)
+        phone = c2.text_input("Tu WhatsApp o teléfono", value=(patient["telefono"] if patient else "") or "")
+        if st.form_submit_button("Enviar solicitud", type="primary", icon=":material/send:"):
+            try:
+                rq.create_request(clin, id_paciente=id_paciente, tipo=tipo, sintomas=sintomas, preferencia=pref,
+                                  telefono=phone, canal="PORTAL", now=ctx.clock())
+                st.session_state.sol_emergency = rq.is_emergency(sintomas)
+                st.toast("Solicitud enviada a facturación", icon=":material/send:")
+                st.rerun()
+            except sqlite3.IntegrityError as exc:
+                st.error(str(exc))
+
+
 def patient_appointments_tab(id_paciente: int) -> None:
     clin = ctx.get_clin()
     today = _today()
@@ -319,12 +445,37 @@ def patient_appointments_tab(id_paciente: int) -> None:
             elif c["turno"]:
                 b.markdown(chip(f"Turno {c['turno']}", "ok"), unsafe_allow_html=True)
             _cancel_popover(d, c, "pac", only_patient=id_paciente)
-    with st.expander("Agendar una cita", icon=":material/event_available:", expanded=not upcoming):
-        booking_form(id_paciente, "pac", allow_patient_pick=False)
-    past = sch.appointments(clin, day_from="2000-01-01", day_to=(today - timedelta(days=0)).isoformat(),
-                            id_paciente=id_paciente, states=("CUMPLIDA", "NO_ASISTIO", "CANCELADA"))
-    if past:
+
+    section_title("Pedir una cita")
+    if st.session_state.pop("sol_emergency", False):
+        banner(f"<b>{esc(rq.EMERGENCY_TEXT)}</b>", "danger")
+    requests = rq.patient_requests(clin, id_paciente)
+    pending = next((r for r in requests if r["estado"] == "PENDIENTE"), None)
+    if pending:
+        with st.container(border=True):
+            a, b = st.columns([4, 1.2], vertical_alignment="center")
+            a.markdown(f"**Solicitud enviada el {_ts(pending['creada_en'])}** · {esc(rq.TYPES[pending['tipo']])} · "
+                       f"{esc(rq.PREFERENCES[pending['preferencia']].lower())}<br>"
+                       f"<span style='color:{MUTED};font-size:0.85rem'>{esc(pending['sintomas'])}</span><br>"
+                       + chip("Facturación te escribirá por WhatsApp o verás la cita aquí", "info"),
+                       unsafe_allow_html=True)
+            if b.button("Retirar", key=f"sol_cancel_{pending['id']}", width="stretch"):
+                rq.cancel_request(clin, pending["id"], id_paciente, ctx.clock())
+                st.rerun()
+    else:
+        st.caption("Cuéntanos qué te pasa y facturación te asigna la cita con el profesional adecuado. "
+                   "También puedes escribírselo al asistente.")
+        _request_form(clin, id_paciente)
+    if config.HOSPITAL_WHATSAPP:
+        st.link_button("Escribir a facturación por WhatsApp", icon=":material/chat:",
+                       url=rq.whatsapp_link(config.HOSPITAL_WHATSAPP, "Hola, quiero pedir una cita en el HSLV.")
+                       or f"https://wa.me/{config.HOSPITAL_WHATSAPP}")
+    answered = [r for r in requests if r["estado"] == "CERRADA"][:3]
+    for r in answered:
+        banner(f"<b>Respuesta de facturación</b> ({_ts(r['atendida_en'])}): {esc(r['respuesta'])}", "info")
+
+    history = sch.appointments(clin, day_from="2000-01-01", day_to=(today + timedelta(days=120)).isoformat(),
+                               id_paciente=id_paciente)
+    if history:
         section_title("Historial de citas")
-        st.dataframe(pd.DataFrame([{"Fecha": _ts(c["fecha_hora"]), "Especialidad": c["especialidad"].title(),
-                                    "Profesional": c["medico"], "Estado": STATE[c["estado"]][0]} for c in past[::-1]]),
-                     hide_index=True, width="stretch")
+        colored_history(history[::-1])

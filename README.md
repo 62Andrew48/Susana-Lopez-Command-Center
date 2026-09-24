@@ -62,12 +62,16 @@ Sin `.env` todo funciona en modo **Plan B** (sin red y sin costo).
 | Buscar historias, descargar PDF, exportar e importar (JSON) | ✓ | ✓ | busca | | | busca en la suya y descarga |
 | Alerta de alergia al formular (penicilinas, AINE, sulfas…) | | ✓ | | | | |
 | Medicamento sin existencias: en espera, fecha de llegada, se aparta al llegar (30 días) | pedidos | formula | entrega | | | ve la fecha |
-| Ocupar / liberar camas con estancia estimada | ✓ | ✓ | ✓ | | ve | |
-| Citas (cupos según el turno del médico, sin doble agenda) | | su agenda | | ✓ | | agenda y cancela |
+| Ocupar / liberar camas con estancia estimada | ✓ | ✓ | ✓ | | ocupa para sus pacientes quirúrgicos | |
+| Citas (cupos según el turno del médico, sin doble agenda) | | su agenda | | ✓ | | ve y cancela |
+| Solicitud de cita contando los síntomas (portal o asistente) → facturación agenda y avisa por WhatsApp | | | | ✓ atiende | | ✓ pide |
+| Historial de citas con colores (verde atendida, rojo no asistió, sin color pendiente) | | | | | | ✓ |
 | Turnos de atención (C-007, prioridad Ley 1171 de 2007, pantalla sin nombres) | | llama | | ✓ | | ve cuántos hay antes |
 | Usuarios (crear con clave temporal, suspender, restablecer) y turnos del personal | ✓ | | | | | |
-| Quirófanos: capacidad probada por área, lista de espera (HIS + solicitudes), programación sugerida | ve | solicita y quita las suyas en espera | | | ✓ | |
-| Quirófanos: agendar, cancelar con causa, reprogramar, marcar realizada | | | | | ✓ | |
+| Quirófanos: capacidad probada por área, lista de espera (HIS + solicitudes), programación sugerida con hora | propone el calendario | solicita y quita las suyas en espera | | | acepta o rechaza | |
+| Quirófanos: agendar día y hora, cancelar con causa, reprogramar, marcar realizada (desde el día de la cirugía) | | | | | ✓ | |
+| Aviso de cirugía urgente con su hora | ✓ | la de sus pacientes | | | ✓ | |
+| Solicitudes de registro de personas nuevas (citarlas al hospital o rechazar) | ✓ | | | | | pide sin cuenta |
 | Cobertura de personal ahora y sugerencia de reasignación · causa raíz de la espera | ✓ | | | | | |
 | Asistente por voz (micrófono del chat) y respuesta leída en voz alta | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Asistente: adjuntar CSV, Excel, PDF, TXT o imagen y preguntar sobre el archivo | ✓ | ✓ | ✓ | ✓ | ✓ | |
@@ -90,6 +94,20 @@ exportación e importación queda en la bitácora.
 realizadas; no se agenda en el pasado ni a más de 90 días, ni dos cirugías del mismo paciente el mismo día; una urgente
 a más de 24 h o un día sin cupos exige justificación (15+ caracteres) que queda guardada; cancelar exige causa y, si es
 para hoy/mañana o la causa es "Otro", detalle. Nada se borra: queda cancelada con quién, cuándo y por qué.
+
+**Citas pedidas por el paciente**: el paciente ya no elige médico ni hora; cuenta qué le pasa, qué necesita y en qué
+jornada puede ir (desde "Mis citas" o escribiéndole al asistente: "quiero una cita, tengo tos y fiebre"). La solicitud
+le llega a facturación con aviso en la campana; facturación la agenda con los cupos reales (a los menores les sugiere
+pediatría) y abre WhatsApp con el mensaje ya armado (enlace `wa.me`, sin costo ni API). Si lo que cuenta suena a
+urgencia (dolor en el pecho, falta de aire…), se le indica ir a urgencias o llamar al 123. Con `HOSPITAL_WHATSAPP` en
+`.env` el portal muestra además el botón para escribirle a facturación.
+
+**Personas que no están registradas**: desde el inicio de sesión dejan sus datos; gerencia las cita (día, hora y lugar)
+para ir con su documento, con WhatsApp y correo si hay SMTP; la persona consulta la respuesta con documento + correo.
+
+**Horas de cirugía**: el HIS no trae horas, así que la hora es una sugerencia que el coordinador puede cambiar: la
+jornada quirúrgica de referencia (07:00-19:00, `JORNADA` en `surgery_planner.py`) repartida según la capacidad probada
+del área ese día. Dos cirugías de la misma área no quedan a la misma hora y no se agenda una hora que ya pasó.
 
 **Ingreso con Google** (opcional): copiar `.streamlit/secrets.toml.example` como `.streamlit/secrets.toml` y poner el
 ID y secreto de un cliente OAuth de Google Cloud (el archivo explica los pasos). Solo entra quien tenga ese correo en

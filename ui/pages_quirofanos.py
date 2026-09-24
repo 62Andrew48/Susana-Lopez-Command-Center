@@ -1,7 +1,8 @@
 """
 ui/pages_quirofanos.py — Quirófanos: capacidad por área y día, lista de espera y programación optimizada.
-Coordinación de quirófanos (quirofanos.coordinar) agenda, reprograma, cancela y cierra; los médicos
-(quirofanos.solicitar) piden cirugías y cancelan las suyas en espera; gerencia (quirofanos.ver) consulta.
+Coordinación de quirófanos (quirofanos.coordinar) agenda (día y hora), reprograma, cancela, cierra y acepta o rechaza
+el calendario que propone gerencia (quirofanos.proponer); los médicos (quirofanos.solicitar) piden cirugías y
+cancelan las suyas en espera.
 """
 from __future__ import annotations
 
@@ -48,7 +49,7 @@ def page_quirofanos() -> None:
     comp = _compliance()
     waiting = [dict(r) for r in sp.waitlist(clin)]
     scheduled = [dict(r) for r in sp.waitlist(clin, ("PROGRAMADA",))]
-    start = _today() + timedelta(days=1)
+    start = _today()  # desde hoy: una urgente puede quedar para hoy mismo, en una hora que aún no pasó
     horizon = 14
     free_total = int(sum(profile.set_index(["area", "dow"])["libres"].get((a, (start + timedelta(days=i)).weekday()), 0)
                          for a in profile["area"].unique() for i in range(horizon)))
@@ -80,20 +81,76 @@ def page_quirofanos() -> None:
         _capacity_tab(profile)
 
 
+def _proposal_box(clin, profile) -> None:
+    """Coordinación ve el calendario que propuso gerencia y lo acepta o rechaza; gerencia ve en qué quedó."""
+    head, items = sp.pending_proposal(clin)
+    coordinator = ctx.can("quirofanos.coordinar")
+    if head is None:
+        last = sp.last_answered(clin)
+        if last is not None and ctx.can("quirofanos.proponer"):
+            if last["estado"] == "ACEPTADA":
+                banner(f"Coordinación (<b>{esc(last['quien'])}</b>) aceptó tu propuesta #{last['id']} el "
+                       f"{last['respondida_en'][8:10]}/{last['respondida_en'][5:7]}: {last['aplicadas']} cirugías "
+                       "programadas.", "ok")
+            else:
+                banner(f"Coordinación rechazó tu propuesta #{last['id']}: {esc(last['motivo'])}", "warn")
+        return
+    when = f"{head['creada_en'][8:10]}/{head['creada_en'][5:7]} {head['creada_en'][11:16]}"
+    if not coordinator:
+        banner(f"Propuesta #{head['id']} enviada el {when}: {len(items)} cirugías. Esperando respuesta de "
+               "coordinación de quirófanos.", "info")
+        return
+    with st.container(border=True):
+        st.markdown(f"**Calendario propuesto por {esc(head['autor'])}** · {when} · {len(items)} cirugías "
+                    + chip("Pendiente de tu respuesta", "warn"), unsafe_allow_html=True)
+        df = pd.DataFrame([{"Fecha": f"{i['fecha'][8:10]}/{i['fecha'][5:7]}", "Hora": i["hora"],
+                            "Paciente": i["paciente"], "Área": _area(i["area_quirofano"]),
+                            "Prioridad": sp.PRIORITY_LABEL[i["prioridad"]],
+                            "Estado hoy": STATE.get(i["estado"], i["estado"])} for i in items])
+        st.dataframe(df, hide_index=True, width="stretch", height=min(38 * (len(df) + 1), 300))
+        a, b = st.columns([1, 2], vertical_alignment="bottom")
+        if a.button("Aceptar calendario", type="primary", icon=":material/task_alt:", key="qx_accept"):
+            done, skipped = sp.accept_proposal(clin, head["id"], ctx.user_id(), ctx.clock(), profile, coordinator=True)
+            st.session_state.qx_accept_msg = (done, skipped)
+            st.rerun()
+        with b.popover("Rechazar", icon=":material/block:"):
+            reason = st.text_input("Motivo", key="qx_reject_reason", placeholder="Ej.: falta anestesiólogo el jueves")
+            if st.button("Rechazar propuesta", key="qx_reject"):
+                try:
+                    sp.reject_proposal(clin, head["id"], ctx.user_id(), ctx.clock(), reason, coordinator=True)
+                    st.rerun()
+                except sqlite3.IntegrityError as exc:
+                    st.error(str(exc))
+        st.caption("Al aceptar se programa cada cirugía con las mismas reglas de siempre; las que ya no estén en "
+                   "espera o choquen de hora se omiten y te las mostramos.")
+
+
 def _plan_tab(clin, waiting, profile, start, horizon) -> None:
+    msg = st.session_state.pop("qx_accept_msg", None)
+    if msg:
+        st.success(f"Calendario aceptado: {msg[0]} cirugías programadas.")
+        for line in msg[1][:8]:
+            st.caption(f"No se programó · {line}")
+    _proposal_box(clin, profile)
     st.caption("Urgentes en 24 h, prioritarias en 7 días y electivas por antigüedad, al primer día con cupo libre en "
-               "su área. La capacidad sale de lo que cada área ya demostró operar (sin inventar salas ni horarios).")
+               "su área. La capacidad sale de lo que cada área ya demostró operar. La hora es sugerida: la jornada "
+               f"quirúrgica ({sp.JORNADA[0]:02d}:00 a {sp.JORNADA[1]:02d}:00) repartida según esa capacidad; se "
+               "puede cambiar al agendar.")
     if not waiting:
         st.info("No hay solicitudes en espera.")
         return
-    used = sp.scheduled_counts(clin, start.isoformat(), (start + timedelta(days=horizon)).isoformat())
-    proposal = sp.plan(waiting, profile, start, horizon, used)
+    end = (start + timedelta(days=horizon)).isoformat()
+    used = sp.scheduled_counts(clin, start.isoformat(), end)
+    proposal = sp.plan(waiting, profile, start, horizon, used, sp.taken_hours(clin, start.isoformat(), end),
+                       ctx.clock())
     fit = [p for p in proposal if p["fecha"]]
     alerts = [p for p in proposal if p["alerta"]]
     st.markdown(" ".join([chip(f"{len(fit)} de {len(proposal)} con fecha propuesta", "ok"),
                           chip(f"{len(alerts)} con alerta", "warn" if alerts else "ok")]), unsafe_allow_html=True)
-    for p in [p for p in proposal if p["alerta"] and p["prioridad"] == "URGENTE"]:
-        banner(f"<b>Urgente:</b> {esc(p['paciente'])} · {esc(_area(p['area']))}: {esc(p['alerta'])}.", "danger")
+    for p in [p for p in proposal if p["prioridad"] == "URGENTE"]:
+        when = f"el {p['fecha'][8:10]}/{p['fecha'][5:7]} a las {p['hora']}" if p["fecha"] else "sin fecha"
+        banner(f"<b>Urgente:</b> {esc(p['paciente'])} · {esc(_area(p['area']))} · sugerida {when}"
+               + (f". {esc(p['alerta'])}." if p["alerta"] else "."), "danger")
     # Carga por día: habitual + propuesta vs capacidad (todas las áreas)
     days = [start + timedelta(days=i) for i in range(horizon)]
     prof = profile.groupby("dow")[["habitual", "capacidad"]].sum()
@@ -109,14 +166,25 @@ def _plan_tab(clin, waiting, profile, start, horizon) -> None:
     fig.update_layout(barmode="stack", legend=dict(orientation="h", y=-0.2))
     fig.update_yaxes(title="cirugías por día")
     show(style_fig(fig, 340, "Cirugías por día: carga habitual + programación vs. capacidad"))
-    df = pd.DataFrame([{"Fecha": p["fecha"] or "—", "Paciente": p["paciente"], "Área": _area(p["area"]),
-                        "Prioridad": sp.PRIORITY_LABEL[p["prioridad"]], "Días esperando": p["espera_dias"],
-                        "Alerta": p["alerta"] or ""} for p in proposal])
+    df = pd.DataFrame([{"Fecha": p["fecha"] or "—", "Hora": p["hora"] or "—", "Paciente": p["paciente"],
+                        "Área": _area(p["area"]), "Prioridad": sp.PRIORITY_LABEL[p["prioridad"]],
+                        "Días esperando": p["espera_dias"], "Alerta": p["alerta"] or ""} for p in proposal])
     st.dataframe(df, hide_index=True, width="stretch", height=min(38 * (len(df) + 1), 420))
     coordinator = ctx.can("quirofanos.coordinar")
-    if not coordinator:
+    if ctx.can("quirofanos.proponer"):
+        if st.button(f"Enviar propuesta a coordinación ({len(fit)} cirugías)", type="primary",
+                     icon=":material/send:", disabled=not fit, key="qx_propose"):
+            try:
+                pid = sp.propose(clin, fit, ctx.user_id(), ctx.clock(), can_propose=True)
+                st.toast(f"Propuesta #{pid} enviada a coordinación de quirófanos", icon=":material/send:")
+                st.rerun()
+            except sqlite3.IntegrityError as exc:
+                st.error(str(exc))
+        st.caption("Coordinación de quirófanos la acepta o la rechaza con un motivo. Una propuesta nueva reemplaza "
+                   "la pendiente.")
+    elif not coordinator:
         st.caption("La programación la confirma coordinación de quirófanos.")
-    if coordinator and st.button(f"Confirmar la programación ({len(fit)} cirugías)", type="primary",
+    if coordinator and st.button(f"Confirmar esta programación ({len(fit)} cirugías)", type="primary",
                                  icon=":material/event_available:", disabled=not fit):
         n = sp.confirm(clin, fit, ctx.user_id(), ctx.clock(), coordinator=True)
         st.toast(f"{n} cirugías programadas", icon=":material/check_circle:")
@@ -175,27 +243,7 @@ def _waitlist_table(clin, waiting, profile) -> None:
         if not coordinator:
             st.caption("Solo coordinación de quirófanos agenda cirugías.")
         else:
-            day = st.date_input("Fecha de la cirugía", value=_today() + timedelta(days=1), min_value=_today(),
-                                max_value=_today() + timedelta(days=sp.MAX_DAYS_AHEAD), format="DD/MM/YYYY",
-                                key=f"qx_day_{w['id']}")
-            free, used = sp.free_on(clin, profile, w["area_quirofano"], day.isoformat())
-            over = used >= free
-            urgent_late = w["prioridad"] == "URGENTE" and (day - _today()).days > 1
-            st.markdown(chip(f"{used} programadas de {free} cupos ese día", "danger" if over else "ok"),
-                        unsafe_allow_html=True)
-            just = ""
-            if over or urgent_late:
-                just = st.text_area("Justificación (sobrecupo o urgente fuera de 24 h)", key=f"qx_just_{w['id']}",
-                                    placeholder="Ej.: se habilita turno quirúrgico adicional de 14:00 a 19:00")
-            if st.button("Agendar cirugía", type="primary", key=f"qx_sched_{w['id']}", icon=":material/event:"):
-                try:
-                    sp.schedule(clin, w["id"], day.isoformat(), ctx.user_id(), ctx.clock(), profile,
-                                coordinator=True, justification=just)
-                    st.toast(f"Cirugía agendada para el {day:%d/%m/%Y}", icon=":material/check_circle:")
-                    _clear_selection()
-                    st.rerun()
-                except sqlite3.IntegrityError as exc:
-                    st.error(str(exc))
+            _schedule_form(clin, w, profile)
     with right.container(border=True):
         st.markdown("**Quitar de la lista**")
         _cancel_form(clin, w, "w")
@@ -204,6 +252,49 @@ def _waitlist_table(clin, waiting, profile) -> None:
 def _clear_selection() -> None:
     """La tabla cambió: se quita la selección para que no quede marcada otra solicitud por su posición."""
     st.session_state.qx_wait_v = st.session_state.get("qx_wait_v", 0) + 1
+
+
+def _schedule_form(clin, w, profile) -> None:
+    """Agendar día y hora (solo coordinación). Urgente: por defecto hoy."""
+    first = _today() + timedelta(days=0 if w["prioridad"] == "URGENTE" else 1)
+    day = st.date_input("Fecha de la cirugía", value=first, min_value=_today(),
+                        max_value=_today() + timedelta(days=sp.MAX_DAYS_AHEAD), format="DD/MM/YYYY",
+                        key=f"qx_day_{w['id']}")
+    taken = sp.taken_hours(clin, day.isoformat(), day.isoformat()).get((w["area_quirofano"], day.isoformat()),
+                                                                     set())
+    suggested = sp.suggest_hour(profile, w["area_quirofano"], day, taken, ctx.clock())
+    times = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 15, 30, 45)]
+    if day == _today():
+        times = [t for t in times if t > ctx.clock()[11:16]]
+    default = suggested if suggested in times else (times[0] if times else None)
+    if not times:
+        st.warning("Ya no quedan horas hoy: elige otro día.")
+        return
+    hour = st.selectbox("Hora de inicio", times, index=times.index(default),
+                        key=f"qx_hour_{w['id']}_{day.isoformat()}",
+                        format_func=lambda t: f"{t} (sugerida)" if t == suggested else t,
+                        help="Sugerida según la jornada y la capacidad del área; puedes cambiarla")
+    if taken:
+        st.caption("Horas ya ocupadas en el área ese día: " + ", ".join(sorted(taken)))
+    free, used = sp.free_on(clin, profile, w["area_quirofano"], day.isoformat())
+    over = used >= free
+    urgent_late = w["prioridad"] == "URGENTE" and (day - _today()).days > 1
+    st.markdown(chip(f"{used} programadas de {free} cupos ese día", "danger" if over else "ok"),
+                unsafe_allow_html=True)
+    just = ""
+    if over or urgent_late:
+        just = st.text_area("Justificación (sobrecupo o urgente fuera de 24 h)", key=f"qx_just_{w['id']}",
+                            placeholder="Ej.: se habilita turno quirúrgico adicional de 14:00 a 19:00")
+    if st.button("Agendar cirugía", type="primary", key=f"qx_sched_{w['id']}", icon=":material/event:"):
+        try:
+            sp.schedule(clin, w["id"], day.isoformat(), ctx.user_id(), ctx.clock(), profile,
+                        coordinator=True, justification=just, hour=hour)
+            st.toast(f"Cirugía agendada para el {day:%d/%m/%Y} a las {hour}",
+                     icon=":material/check_circle:")
+            _clear_selection()
+            st.rerun()
+        except sqlite3.IntegrityError as exc:
+            st.error(str(exc))
 
 
 def _cancel_form(clin, w, key: str) -> None:
@@ -228,7 +319,16 @@ def _scheduled_tab(clin, scheduled) -> None:
         st.info("Aún no hay cirugías programadas. Confírmalas en “Programación sugerida” o agéndalas desde la lista.")
         return
     coordinator = ctx.can("quirofanos.coordinar")
-    for day, group in pd.DataFrame(scheduled).sort_values("fecha_programada").groupby("fecha_programada", sort=True):
+    today = ctx.clock()[:10]
+    for u in [x for x in scheduled if x["prioridad"] == "URGENTE"]:
+        d = date.fromisoformat(u["fecha_programada"])
+        label = "hoy" if u["fecha_programada"] == today else f"el {sp.DOW[d.weekday()]} {d:%d/%m}"
+        banner(f"<b>Urgente {label} a las {esc(u['hora_programada'] or 'hora por definir')}</b> · "
+               f"{esc(u['paciente'])} · {esc(_area(u['area_quirofano']))}", "danger")
+    df_all = pd.DataFrame(scheduled)
+    df_all["hora_programada"] = df_all["hora_programada"].fillna("—")
+    for day, group in df_all.sort_values(["fecha_programada", "hora_programada"]).groupby("fecha_programada",
+                                                                                          sort=True):
         d = date.fromisoformat(day)
         st.markdown(f"#### {sp.DOW[d.weekday()].capitalize()} {d:%d/%m/%Y} · {len(group)} cirugía(s)")
         for s_ in group.to_dict("records"):
@@ -236,11 +336,14 @@ def _scheduled_tab(clin, scheduled) -> None:
                 a, b, c = st.columns([3, 1, 1.6], vertical_alignment="center")
                 over = f"<br><span class='muted'>Sobrecupo: {esc(s_['sobrecupo_justificacion'])}</span>" \
                     if s_.get("sobrecupo_justificacion") else ""
-                a.markdown(f"{esc(s_['paciente'])} · {esc(_area(s_['area_quirofano']))} "
+                a.markdown(f"<b>{esc(s_['hora_programada'])}</b> · {esc(s_['paciente'])} · "
+                           f"{esc(_area(s_['area_quirofano']))} "
                            f"{chip(sp.PRIORITY_LABEL[s_['prioridad']], 'danger' if s_['prioridad'] == 'URGENTE' else 'neutral')}"
                            f"<br><span class='muted'>{esc(s_['nota'] or '')}</span>{over}", unsafe_allow_html=True)
                 if coordinator and b.button("Realizada", key=f"qx_done_{s_['id']}", width="stretch",
-                                            disabled=day > ctx.clock()[:10], help="Disponible el día de la cirugía"):
+                                            disabled=day > today,
+                                            help="Se habilita desde el día de la cirugía (no se cierra una cirugía "
+                                                 "de una fecha futura)" if day > today else "Marcar como realizada"):
                     sp.mark_done(clin, s_["id"], ctx.user_id(), ctx.clock(), coordinator=True)
                     st.rerun()
                 with c.popover("Reprogramar / cancelar", width="stretch"):

@@ -54,6 +54,7 @@ SCOPES = {
     "paciente": Scope("paciente", "Tus fórmulas y tus citas", False, (
         "¿Qué medicamentos tengo por reclamar?",
         "¿Cuándo es mi próxima cita?",
+        "Quiero una cita: tengo tos y fiebre desde hace 3 días",
         "¿Qué es una EPS?")),
     "ninguno": Scope("ninguno", "", False, ()),
 }
@@ -77,7 +78,8 @@ def _norm(text: str) -> str:
 def _limit(question: str, scope: Scope) -> AgentResponse:
     can = {"operativo": "camas libres, inventario y rotación de medicamentos, tiempos de espera en urgencias, "
                         "alertas del hospital y significado de términos (por ejemplo, “¿qué es triage?”)",
-           "paciente": "tus medicamentos por reclamar, tus citas y el significado de términos de salud"}.get(
+           "paciente": "tus medicamentos por reclamar, tus citas, pedir una cita contándome qué te pasa y el "
+                       "significado de términos de salud"}.get(
         scope.code, "nada por ahora")
     return AgentResponse(question, f"Eso no está disponible para tu usuario. Puedo ayudarte con: {can}.",
                          engine="fuera de alcance")
@@ -88,11 +90,38 @@ def _limit(question: str, scope: Scope) -> AgentResponse:
 # ---------------------------------------------------------------------------
 _RX = re.compile(r"medicament|formula|receta|reclam|remedio|pastilla|farmacia|droga")
 _APPT = re.compile(r"\bcita|consulta|control|reevaluac|medico")
+_WANT_APPT = re.compile(r"(quiero|necesito|pedir|pido|solicit|agend|sacar|separar|programar|me pueden dar|dar)\w*\s.{0,40}"
+                        r"\b(cita|consulta|medico|doctor)|\b(me duele|dolor|fiebre|tos\b|gripa|mareo|vomit|diarrea|"
+                        r"me siento mal|sintoma|me enferme|brote|alergia)")
+
+
+def _request_appointment(question: str, clin: sqlite3.Connection, id_paciente: int, now: str) -> AgentResponse:
+    """El paciente pide una cita por chat: se crea la solicitud y le llega a facturación."""
+    import requests_service as rq
+    q = _norm(question)
+    tipo = "CONTROL" if "control" in q else "RESULTADOS" if "resultado" in q else \
+        "ESPECIALISTA" if "especialista" in q else "MEDICINA_GENERAL"
+    pref = "MANANA" if "manana" in q else "TARDE" if "tarde" in q else "CUALQUIERA"
+    urgent = rq.is_emergency(question)
+    lead = f"**{rq.EMERGENCY_TEXT}**\n\n" if urgent else ""
+    phone = clin.execute("SELECT telefono FROM pacientes_clinicos WHERE id_paciente = ?", (id_paciente,)).fetchone()
+    try:
+        rq.create_request(clin, id_paciente=id_paciente, tipo=tipo, sintomas=question, preferencia=pref,
+                          telefono=phone[0] if phone else None, canal="ASISTENTE", now=now)
+    except sqlite3.IntegrityError as exc:
+        return AgentResponse(question, lead + f"{exc}. Puedes verla en “Mis fórmulas y citas” → Mis citas.",
+                             engine="mis datos")
+    return AgentResponse(question, lead + f"Listo, le envié tu solicitud a facturación ({rq.TYPES[tipo].lower()}, "
+                                          f"{rq.PREFERENCES[pref].lower()}) con lo que me contaste. Te escribirán por "
+                                          "WhatsApp o verás la cita en “Mis fórmulas y citas” → Mis citas.",
+                         engine="mis datos")
 
 
 def _patient_answer(question: str, clin: sqlite3.Connection, id_paciente: int, now: str) -> AgentResponse | None:
     q = _norm(question)
     t = datetime.strptime(now, FMT)
+    if _WANT_APPT.search(q) and not re.search(r"cuando|a que hora|tengo (alguna |una )?cita|mis citas|proxima", q):
+        return _request_appointment(question, clin, id_paciente, now)
     if _RX.search(q):
         rows = clin.execute("""
             SELECT f.nombre AS producto, p.estado, p.ambito, p.fecha_limite_reclamo, p.requiere_reevaluacion,

@@ -225,21 +225,99 @@ def _surgery(clin: sqlite3.Connection, now: str) -> list[Notification]:
     return out
 
 
+def _surgery_urgent(clin: sqlite3.Connection, now: str, creado_por: int | None = None) -> list[Notification]:
+    """Cirugías urgentes ya programadas, con su hora (hoy y mañana)."""
+    extra, args = ("AND s.creado_por = ?", [creado_por]) if creado_por else ("", [])
+    rows = clin.execute(f"""
+        SELECT s.id, s.fecha_programada, s.hora_programada, s.area_quirofano,
+               COALESCE(NULLIF(trim(pc.nombres || ' ' || pc.apellidos), ''), 'Paciente ' || s.id_paciente) AS paciente
+          FROM cirugias_solicitudes s LEFT JOIN pacientes_clinicos pc ON pc.id_paciente = s.id_paciente
+         WHERE s.estado = 'PROGRAMADA' AND s.prioridad = 'URGENTE' AND s.fecha_programada BETWEEN ? AND date(?, '+1 day')
+               {extra} ORDER BY s.fecha_programada, s.hora_programada""", [now[:10], now[:10], *args]).fetchall()
+    out = []
+    for r in rows:
+        day = "hoy" if r["fecha_programada"] == now[:10] else "mañana"
+        out.append(Notification(f"qx_urg_prog:{r['id']}:{r['fecha_programada']}:{r['hora_programada']}", "crítica",
+                                f"Cirugía urgente {day} a las {r['hora_programada'] or 'hora por definir'}",
+                                f"{r['paciente']} · {r['area_quirofano'].split(' - ')[-1].title()}", "quirofanos",
+                                "Ver"))
+    return out
+
+
+def _proposal(clin: sqlite3.Connection, for_coordinator: bool) -> list[Notification]:
+    if for_coordinator:
+        row = clin.execute("SELECT p.id, p.creada_en, (SELECT COUNT(*) FROM cirugias_propuesta_items i "
+                           "WHERE i.propuesta_id = p.id) AS n FROM cirugias_propuestas p WHERE p.estado = 'PENDIENTE' "
+                           "ORDER BY p.id DESC LIMIT 1").fetchone()
+        if row is None:
+            return []
+        return [Notification(f"qx_prop:{row['id']}", "alta", "Gerencia propuso un calendario quirúrgico",
+                             f"{_n(row['n'], 'cirugía', 'cirugías')} · acéptalo o recházalo con un motivo",
+                             "quirofanos", "Revisar")]
+    row = clin.execute("SELECT id, estado, aplicadas, motivo FROM cirugias_propuestas WHERE estado IN "
+                       "('ACEPTADA','RECHAZADA') ORDER BY id DESC LIMIT 1").fetchone()
+    if row is None:
+        return []
+    detail = (f"{row['aplicadas']} cirugías programadas" if row["estado"] == "ACEPTADA"
+              else f"Motivo: {str(row['motivo'])[:80]}")
+    return [Notification(f"qx_prop_resp:{row['id']}:{row['estado']}", "info" if row["estado"] == "ACEPTADA" else "media",
+                         f"Coordinación {'aceptó' if row['estado'] == 'ACEPTADA' else 'rechazó'} tu propuesta "
+                         f"#{row['id']}", detail, "quirofanos", "Ver")]
+
+
+def _registrations(clin: sqlite3.Connection) -> list[Notification]:
+    n = clin.execute("SELECT COUNT(*) FROM solicitudes_registro WHERE estado = 'PENDIENTE'").fetchone()[0]
+    if not n:
+        return []
+    return [Notification(f"registro:{n}", "media", _n(n, "persona pide registrarse", "personas piden registrarse"),
+                         "Cítalas para que vayan al hospital con su documento.", "personal", "Atender")]
+
+
+def _billing(clin: sqlite3.Connection, now: str) -> list[Notification]:
+    rows = clin.execute("SELECT id, creada_en FROM solicitudes_cita WHERE estado = 'PENDIENTE' ORDER BY creada_en"
+                        ).fetchall()
+    if not rows:
+        return []
+    oldest_h = (_dt(now) - _dt(rows[0]["creada_en"])).total_seconds() / 3600
+    return [Notification(f"solcita:{rows[-1]['id']}:{len(rows)}", "alta" if oldest_h >= 24 else "media",
+                         _n(len(rows), "solicitud de cita por atender", "solicitudes de cita por atender"),
+                         f"La más antigua espera hace {int(oldest_h)} h. Agenda y avisa por WhatsApp.", "atencion",
+                         "Atender")]
+
+
+def _patient_requests(clin: sqlite3.Connection, id_paciente: int) -> list[Notification]:
+    out = []
+    for r in clin.execute("SELECT s.id, s.estado, s.respuesta, c.fecha_hora FROM solicitudes_cita s "
+                          "LEFT JOIN citas c ON c.id = s.cita_id WHERE s.id_paciente = ? "
+                          "AND s.estado IN ('AGENDADA','CERRADA') ORDER BY s.id DESC LIMIT 3", (id_paciente,)):
+        if r["estado"] == "AGENDADA":
+            out.append(Notification(f"pac_sol:{r['id']}:A", "alta", "Te agendaron la cita que pediste",
+                                    f"{_dt(r['fecha_hora']):%d/%m a las %H:%M}", "portal", "Ver cita"))
+        else:
+            out.append(Notification(f"pac_sol:{r['id']}:C", "alta", "Facturación respondió tu solicitud",
+                                    str(r["respuesta"])[:120], "portal", "Ver"))
+    return out
+
+
 def collect(role: str, user: dict, clin: sqlite3.Connection, analytics: sqlite3.Connection, now: str,
             alerts: list) -> list[Notification]:
     """Notificaciones del usuario, ordenadas por severidad. Cada rol ve solo lo que puede atender."""
     to_beds = {"Ocupación": "camas", "Farmacia": "alertas"}
     if role == "ADMIN":
         items = (_hospital(alerts, {"Ocupación", "Farmacia", "Urgencias", "Demanda", "Cirugías"}, to_beds, clin)
-                 + _triage(analytics, now) + _admin_audit(clin) + _backorders(clin))
+                 + _triage(analytics, now) + _admin_audit(clin) + _backorders(clin) + _registrations(clin)
+                 + _proposal(clin, for_coordinator=False) + _surgery_urgent(clin, now))
     elif role == "DOCTOR":
-        items = _doctor(clin, user["id"]) + _triage(analytics, now) + _hospital(alerts, {"Ocupación"}, to_beds)
+        items = (_doctor(clin, user["id"]) + _triage(analytics, now) + _hospital(alerts, {"Ocupación"}, to_beds)
+                 + _surgery_urgent(clin, now, creado_por=user["id"]))
     elif role == "ENFERMERIA":
         items = _nurse(clin, now) + _triage(analytics, now) + _hospital(alerts, {"Ocupación", "Farmacia"}, to_beds, clin)
     elif role == "QUIROFANOS":
-        items = _surgery(clin, now)
+        items = _surgery(clin, now) + _surgery_urgent(clin, now) + _proposal(clin, for_coordinator=True)
+    elif role == "FACTURACION":
+        items = _billing(clin, now)
     elif role == "PACIENTE":
-        items = _patient(clin, user["id_paciente"], now)
+        items = _patient(clin, user["id_paciente"], now) + _patient_requests(clin, user["id_paciente"])
     else:
         items = []
     return sorted(items, key=lambda n: ORDER.get(n.severity, 9))

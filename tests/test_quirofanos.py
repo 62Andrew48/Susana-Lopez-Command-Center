@@ -109,19 +109,19 @@ def test_schedule_rules_overbooking_needs_justification(clin):
     rid = sp.request_surgery(clin, id_paciente=110, area=GEN, prioridad="ELECTIVA", procedimiento="Herniorrafia inguinal",
                              user_id=DRA, now=NOW)
     with pytest.raises(sqlite3.IntegrityError, match="Solo coordinación"):
-        sp.schedule(clin, rid, "2026-09-23", DRA, NOW, prof, coordinator=False)
+        sp.schedule(clin, rid, "2026-09-23", DRA, NOW, prof, coordinator=False, hour="16:30")
     with pytest.raises(sqlite3.IntegrityError, match="anterior"):
-        sp.schedule(clin, rid, "2026-09-20", COORD, NOW, prof, coordinator=True)
+        sp.schedule(clin, rid, "2026-09-20", COORD, NOW, prof, coordinator=True, hour="16:30")
     free, _ = sp.free_on(clin, prof, GEN, "2026-09-23")
     fillers = [sp.request_surgery(clin, id_paciente=110 + 0, area=GEN, prioridad="ELECTIVA",
                                   procedimiento=f"Relleno {i}", user_id=DRA, now=NOW) for i in range(free)]
     for i, f in enumerate(fillers):   # llena los cupos del día con pacientes distintos (id del extracto)
         clin.execute("UPDATE cirugias_solicitudes SET id_paciente = ? WHERE id = ?", (900000 + i, f))
-        sp.schedule(clin, f, "2026-09-23", COORD, NOW, prof, coordinator=True)
+        sp.schedule(clin, f, "2026-09-23", COORD, NOW, prof, coordinator=True, hour=f"{7 + i:02d}:00")
     with pytest.raises(sqlite3.IntegrityError, match="justificación"):
-        sp.schedule(clin, rid, "2026-09-23", COORD, NOW, prof, coordinator=True)
+        sp.schedule(clin, rid, "2026-09-23", COORD, NOW, prof, coordinator=True, hour="16:30")
     sp.schedule(clin, rid, "2026-09-23", COORD, NOW, prof, coordinator=True,
-                justification="Se habilita turno quirúrgico adicional en la tarde")
+                justification="Se habilita turno quirúrgico adicional en la tarde", hour="16:30")
     row = clin.execute("SELECT sobrecupo_justificacion FROM cirugias_solicitudes WHERE id = ?", (rid,)).fetchone()
     assert "turno quirúrgico" in row[0]
 
@@ -133,10 +133,10 @@ def test_same_patient_same_day_and_urgent_window(clin):
     b = sp.request_surgery(clin, id_paciente=110, area=GEN, prioridad="ELECTIVA", procedimiento="Colecistectomía",
                            user_id=DRA, now=NOW)
     with pytest.raises(sqlite3.IntegrityError, match="urgente"):
-        sp.schedule(clin, a, "2026-09-25", COORD, NOW, prof, coordinator=True)
-    sp.schedule(clin, a, "2026-09-22", COORD, NOW, prof, coordinator=True, justification="")
+        sp.schedule(clin, a, "2026-09-25", COORD, NOW, prof, coordinator=True, hour="16:30")
+    sp.schedule(clin, a, "2026-09-22", COORD, NOW, prof, coordinator=True, justification="", hour="16:30")
     with pytest.raises(sqlite3.IntegrityError, match="otra cirugía programada ese día"):
-        sp.schedule(clin, b, "2026-09-22", COORD, NOW, prof, coordinator=True)
+        sp.schedule(clin, b, "2026-09-22", COORD, NOW, prof, coordinator=True, hour="16:30")
 
 
 def test_cancel_rules_by_role(clin):
@@ -156,7 +156,7 @@ def test_cancel_rules_by_role(clin):
     other = sp.request_surgery(clin, id_paciente=110, area=GEN, prioridad="ELECTIVA", procedimiento="Biopsia",
                                user_id=DRA, now=NOW)
     sp.schedule(clin, other, "2026-09-22", COORD, NOW, prof, coordinator=True,
-                justification="Cupo acordado con el servicio de cirugía")
+                justification="Cupo acordado con el servicio de cirugía", hour="16:30")
     with pytest.raises(sqlite3.IntegrityError, match="propias"):
         sp.cancel(clin, other, DRA, NOW, category="Paciente desiste", detail="", coordinator=False)
     with pytest.raises(sqlite3.IntegrityError, match="15"):

@@ -120,7 +120,7 @@ CATALOG = [  # grupo del menú, slug, título, icono, página, permisos que la h
     ("Gestión", "predicciones", "Pronósticos", ":material/trending_up:", pp.page_predicciones, {"tablero.gerencial.ver"}),
     ("Gestión", "asistente", "Asistente IA", ":material/forum:", pa.page_asistente, {"agente.consultar"}),
     ("Gestión", "personal", "Personal y turnos", ":material/badge:", pper.page_personal,
-     {"usuarios.administrar", "personal.turnos"}),
+     {"usuarios.administrar", "personal.turnos", "registro.atender"}),
     ("Gestión", "datos", "Datos y auditoría", ":material/folder_managed:", pa.page_datos, {"auditoria.ver"}),
 ]
 HOME = "quirofanos" if ctx.current_user()["rol"] == "QUIROFANOS" else "hoy"  # cada rol entra a su módulo

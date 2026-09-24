@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 import clinical_records as cr
 import pharmacy_service as ps
+import requests_service as rq
 import scheduling as sch
 
 FMT = "%Y-%m-%d %H:%M:%S"
@@ -289,3 +290,16 @@ def seed_cases(conn: sqlite3.Connection) -> None:
         cr.save_ficha(conn, 110, DR_RUIZ, {"sin_alergias_conocidas": True, "grupo_sanguineo": "O+",
                                            "antecedentes_personales": "Sin antecedentes patológicos de importancia."},
                       "2026-09-20 08:40:00")
+    # Solicitudes de cita que esperan a facturación (una por el portal con celular, otra por el asistente sin él)
+    if "1061900333" in ids:
+        rq.create_request(conn, id_paciente=ids["1061900333"], tipo="MEDICINA_GENERAL",
+                          sintomas="Mi hijo sigue con diarrea y desde anoche tiene fiebre de 38. Necesito que lo vean.",
+                          preferencia="MANANA", telefono="3148889900", canal="PORTAL", now="2026-09-21 07:15:00")
+    if conn.execute("SELECT 1 FROM pacientes_clinicos WHERE id_paciente = 110").fetchone():
+        rq.create_request(conn, id_paciente=110, tipo="CONTROL",
+                          sintomas="Todavía me duele la muñeca cuando la muevo, quiero una cita de control",
+                          preferencia="TARDE", telefono=None, canal="ASISTENTE", now="2026-09-21 09:05:00")
+    # Persona que aún no está en el hospital (caso sintético) y pidió registrarse
+    rq.create_registration(conn, nombres="Andrea", apellidos="Muñoz Ledezma", tipo_documento="CC",
+                           numero_documento="1061234567", correo="andrea.munoz@correo.demo", telefono="3165554433",
+                           now="2026-09-20 18:30:00")

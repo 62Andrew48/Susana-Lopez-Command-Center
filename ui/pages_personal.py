@@ -5,12 +5,14 @@ trabajo de las personas a cargo (asignar por días, ver la semana, quitar turnos
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
 import clinical_records as cr
+import mailer
+import requests_service as rq
 import staff
 from ui import context as ctx
 from ui.theme import MUTED, chip, esc
@@ -27,9 +29,72 @@ def page_personal() -> None:
         tabs += ["Cobertura ahora", "Turnos del personal"]; views += [_coverage_tab, _shifts_tab]
     if ctx.can("usuarios.administrar"):
         tabs.append("Usuarios"); views.append(_users_tab)
+    if ctx.can("registro.atender"):
+        n = len(rq.pending_registrations(ctx.get_clin()))
+        tabs.append(f"Solicitudes de registro ({n})" if n else "Solicitudes de registro")
+        views.append(_registrations_tab)
     for tab, view in zip(st.tabs(tabs), views):
         with tab:
             view()
+
+
+# ---------------------------------------------------------------------------
+# Solicitudes de registro: personas que aún no están en el hospital
+# ---------------------------------------------------------------------------
+def _registrations_tab() -> None:
+    clin = ctx.get_clin()
+    done = st.session_state.pop("reg_done", None)
+    if done:
+        st.success(f"{done['nombre']} quedó citado. Avísale:")
+        if done["link"]:
+            st.link_button("Enviar la cita por WhatsApp", done["link"], icon=":material/chat:", type="primary")
+        st.caption("También lo ve en el inicio de sesión → “No estoy registrado” → “Consultar mi solicitud”, "
+                   "con su documento y su correo" + (" y le llegó por correo." if done["mail"] else "."))
+    rows = rq.pending_registrations(clin)
+    if not rows:
+        st.info("No hay solicitudes de registro pendientes. Llegan desde el inicio de sesión: “No estoy registrado en "
+                "el hospital”.")
+        return
+    st.caption("Cítalas para que vayan en persona con su documento: allí admisiones las registra (con su correo) y "
+               "luego crean su cuenta con “Soy paciente: crear mi cuenta”.")
+    now = datetime.strptime(ctx.clock(), "%Y-%m-%d %H:%M:%S")
+    for r in rows:
+        with st.container(border=True):
+            exists = chip("Ya está registrado en el hospital", "warn") if r["ya_existe"] else ""
+            st.markdown(f"**{esc(r['nombres'])} {esc(r['apellidos'])}** · {esc(r['tipo_documento'])} "
+                        f"{esc(r['numero_documento'])} {exists}<br><span style='color:{MUTED}'>{esc(r['correo'])} · "
+                        f"{esc(r['telefono'] or 'sin celular')} · pidió el {r['creada_en'][8:10]}/{r['creada_en'][5:7]} "
+                        f"{r['creada_en'][11:16]}</span>", unsafe_allow_html=True)
+            left, right = st.columns([2, 1])
+            with left.form(f"reg_cite_{r['id']}"):
+                c1, c2 = st.columns(2)
+                day = c1.date_input("Día", value=(now + timedelta(days=1)).date(), min_value=now.date(),
+                                    format="DD/MM/YYYY")
+                times = [f"{h:02d}:{m:02d}" for h in range(6, 19) for m in (0, 15, 30, 45)]
+                hour = c2.selectbox("Hora", times, index=times.index("08:00"))
+                place = st.text_input("Lugar", value="Ventanilla de admisiones y facturación")
+                note = st.text_input("Nota (opcional)", placeholder="Ej.: traiga el carné de su EPS")
+                if st.form_submit_button("Citar para registro", type="primary"):
+                    try:
+                        when = f"{day.isoformat()} {hour}:00"
+                        rq.cite_registration(clin, r["id"], fecha_hora=when, lugar=place, nota=note,
+                                             by=ctx.user_id(), now=ctx.clock())
+                        row = clin.execute("SELECT * FROM solicitudes_registro WHERE id = ?", (r["id"],)).fetchone()
+                        msg = rq.registration_message(row)
+                        st.session_state.reg_done = {"nombre": r["nombres"], "link": rq.whatsapp_link(r["telefono"], msg),
+                                                     "mail": mailer.send_text(r["correo"], "Cita para su registro · HSLV",
+                                                                              msg)}
+                        st.rerun()
+                    except sqlite3.IntegrityError as exc:
+                        st.error(str(exc))
+            with right.popover("Rechazar", width="stretch"):
+                reason = st.text_input("Motivo", key=f"reg_rej_{r['id']}")
+                if st.button("Rechazar solicitud", key=f"reg_rej_btn_{r['id']}"):
+                    try:
+                        rq.reject_registration(clin, r["id"], motivo=reason, by=ctx.user_id(), now=ctx.clock())
+                        st.rerun()
+                    except sqlite3.IntegrityError as exc:
+                        st.error(str(exc))
 
 
 # ---------------------------------------------------------------------------

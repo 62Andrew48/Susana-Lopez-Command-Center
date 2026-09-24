@@ -53,9 +53,29 @@ def apply(beds: pd.DataFrame, conn: sqlite3.Connection, now: str) -> pd.DataFram
     return out
 
 
+SURGICAL_DAYS_BACK = 7   # coordinación de quirófanos: pacientes operados en la última semana o ya programados
+
+
+def surgical_patients(conn: sqlite3.Connection, now: str) -> list[sqlite3.Row]:
+    """Pacientes que le corresponden a coordinación de quirófanos: cirugía programada o realizada hace ≤ 7 días."""
+    since = (datetime.strptime(now[:10], "%Y-%m-%d") - timedelta(days=SURGICAL_DAYS_BACK)).strftime("%Y-%m-%d")
+    return conn.execute("""
+        SELECT s.id_paciente, MIN(s.fecha_programada) AS fecha, MIN(s.hora_programada) AS hora,
+               COALESCE(NULLIF(trim(pc.nombres || ' ' || pc.apellidos), ''), 'Paciente ' || s.id_paciente) AS paciente,
+               group_concat(DISTINCT s.estado) AS estados
+          FROM cirugias_solicitudes s LEFT JOIN pacientes_clinicos pc ON pc.id_paciente = s.id_paciente
+         WHERE s.estado = 'PROGRAMADA' OR (s.estado = 'REALIZADA' AND COALESCE(s.fecha_programada, '') >= ?)
+         GROUP BY s.id_paciente ORDER BY fecha, hora""", (since,)).fetchall()
+
+
 def occupy(conn: sqlite3.Connection, *, codigo_cama: str, id_paciente: int, dias_estimados: int, usuario_id: int,
-           cama_ocupada: bool, now: str) -> None:
-    """Asigna la cama. `cama_ocupada` es el estado actual que ve la pantalla (censo + movimientos)."""
+           cama_ocupada: bool, now: str, surgical_only: bool = False) -> None:
+    """Asigna la cama. `cama_ocupada` es el estado actual que ve la pantalla (censo + movimientos).
+    `surgical_only`: quien solo tiene camas.quirurgicas (coordinación de quirófanos) únicamente asigna camas a
+    pacientes con cirugía programada o realizada en la última semana."""
+    if surgical_only and id_paciente not in {r["id_paciente"] for r in surgical_patients(conn, now)}:
+        raise sqlite3.IntegrityError("Solo puedes asignar camas a pacientes con cirugía programada o realizada "
+                                     f"en los últimos {SURGICAL_DAYS_BACK} días")
     if cama_ocupada:
         raise sqlite3.IntegrityError("La cama ya está ocupada; libérala primero")
     held = conn.execute("""

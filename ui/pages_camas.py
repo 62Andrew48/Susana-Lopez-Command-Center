@@ -149,12 +149,22 @@ def _bed_label(r) -> str:
     return f"{r.ubicacion} ({r.codigo_cama}){who}"
 
 
-def _manage(beds) -> None:
-    """Ocupar una cama libre con un paciente y su estancia estimada, o liberarla (alta, traslado…)."""
+def _surgical_label(r) -> str:
+    if "REALIZADA" in (r["estados"] or "") and "PROGRAMADA" not in (r["estados"] or ""):
+        return f"{r['paciente']} · operado recientemente"
+    when = f"{r['fecha'][8:10]}/{r['fecha'][5:7]}" + (f" {r['hora']}" if r["hora"] else "")
+    return f"{r['paciente']} · cirugía {when}"
+
+
+def _manage(beds, surgical: bool = False) -> None:
+    """Ocupar una cama libre con un paciente y su estancia estimada, o liberarla (alta, traslado…).
+    `surgical`: coordinación de quirófanos solo ocupa camas para SUS pacientes (cirugía programada o reciente)."""
     clin = ctx.get_clin()
     phys = beds[beds["es_virtual"] == 0]
-    with st.expander("Ocupar o liberar una cama", icon=":material/bed:"):
-        mode = st.segmented_control("Acción", ["Ocupar", "Liberar"], default="Ocupar", key="bed_mode")
+    title = "Asignar cama a un paciente quirúrgico" if surgical else "Ocupar o liberar una cama"
+    with st.expander(title, icon=":material/bed:"):
+        mode = "Ocupar" if surgical else st.segmented_control("Acción", ["Ocupar", "Liberar"], default="Ocupar",
+                                                               key="bed_mode")
         units = sorted(phys["unidad"].unique())
         unit = st.selectbox("Unidad", units, key="bed_unit",
                             index=units.index("Hospitalización 1") if "Hospitalización 1" in units else 0)
@@ -181,22 +191,31 @@ def _manage(beds) -> None:
         if free.empty:
             st.caption("No hay camas libres en esta unidad.")
             return
-        q = st.text_input("Paciente", placeholder="Nombre, documento o id", key="bed_q")
-        patients = cr.search_patients(clin, q, limit=30)
-        if not patients:
-            st.caption("No hay pacientes con ese criterio. Regístralo en Clínico y farmacia → Pacientes.")
-            return
+        if surgical:
+            rows = bs.surgical_patients(clin, ctx.clock())
+            if not rows:
+                st.caption("No tienes pacientes con cirugía programada o realizada en la última semana.")
+                return
+            st.caption("Solo aparecen tus pacientes: cirugía programada o realizada en los últimos "
+                       f"{bs.SURGICAL_DAYS_BACK} días. Liberar la cama le corresponde a enfermería o al médico.")
+            names = {r["id_paciente"]: _surgical_label(r) for r in rows}
+        else:
+            q = st.text_input("Paciente", placeholder="Nombre, documento o id", key="bed_q")
+            patients = cr.search_patients(clin, q, limit=30)
+            if not patients:
+                st.caption("No hay pacientes con ese criterio. Regístralo en Clínico y farmacia → Pacientes.")
+                return
+            names = {p["id_paciente"]: f"{cr.display_name(p)} (id {p['id_paciente']})" for p in patients}
         with st.form("bed_occupy"):
             labels = {r.codigo_cama: _bed_label(r) for r in free.itertuples()}
             code = st.selectbox("Cama libre", list(labels), format_func=labels.get)
-            names = {p["id_paciente"]: f"{cr.display_name(p)} (id {p['id_paciente']})" for p in patients}
             pid = st.selectbox("Paciente", list(names), format_func=names.get)
             days = st.number_input("Estancia estimada (días)", 1, 90, 3,
                                    help="Con esto se calcula la salida estimada y el color de la cama")
             if st.form_submit_button("Ocupar cama", type="primary", icon=":material/login:"):
                 try:
                     bs.occupy(clin, codigo_cama=code, id_paciente=int(pid), dias_estimados=int(days),
-                              usuario_id=ctx.user_id(), cama_ocupada=False, now=ctx.clock())
+                              usuario_id=ctx.user_id(), cama_ocupada=False, now=ctx.clock(), surgical_only=surgical)
                     st.toast(f"Cama {code} asignada a {names[pid]}", icon=":material/check_circle:")
                     st.rerun()
                 except sqlite3.IntegrityError as exc:
@@ -230,6 +249,8 @@ def page_camas() -> None:
     _finder(beds)
     if ctx.can("camas.gestionar"):
         _manage(beds)
+    elif ctx.can("camas.quirurgicas"):
+        _manage(beds, surgical=True)
 
     legend, toggle = st.columns([3, 1.2], vertical_alignment="center")
     legend.markdown(f'<div class="map-legend"><span><i class="sw" style="background:{EMERALD}"></i>Libre</span>'

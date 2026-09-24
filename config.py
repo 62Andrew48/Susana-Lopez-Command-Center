@@ -51,6 +51,10 @@ LLM_TIMEOUT_SECONDS = _env_float("LLM_TIMEOUT_SECONDS", 30)
 # Si es "true", el LLM redacta la respuesta en lenguaje natural a partir del resultado.
 LLM_NARRATIVE = os.getenv("LLM_NARRATIVE", "true").lower() == "true"
 
+# --- Contacto -----------------------------------------------------------------
+# WhatsApp de facturación/admisiones (ej. 573001234567). Vacío = el portal no muestra el botón de WhatsApp.
+HOSPITAL_WHATSAPP = os.getenv("HOSPITAL_WHATSAPP", "").strip()
+
 # --- Seguridad de consultas --------------------------------------------------
 SQL_ROW_LIMIT = int(_env_float("SQL_ROW_LIMIT", 500))
 SQL_TIMEOUT_SECONDS = _env_float("SQL_TIMEOUT_SECONDS", 10)

@@ -709,6 +709,7 @@ CREATE TABLE cirugias_solicitudes (
     estado                    TEXT NOT NULL DEFAULT 'EN_ESPERA'
                               CHECK (estado IN ('EN_ESPERA','PROGRAMADA','REALIZADA','CANCELADA')),
     fecha_programada          TEXT,
+    hora_programada           TEXT CHECK (hora_programada IS NULL OR hora_programada GLOB '[0-2][0-9]:[0-5][0-9]'),
     nota                      TEXT,
     motivo                    TEXT,
     motivo_categoria          TEXT,
@@ -722,6 +723,74 @@ CREATE TABLE cirugias_solicitudes (
 CREATE INDEX ix_cirugias_sol ON cirugias_solicitudes(estado, area_quirofano, fecha_programada);
 CREATE TRIGGER trg_cirugias_sol_no_delete BEFORE DELETE ON cirugias_solicitudes
 BEGIN SELECT RAISE(ABORT, 'Las solicitudes quirúrgicas no se eliminan; cancélelas con un motivo'); END;
+
+-- Gerencia propone un calendario quirúrgico; coordinación de quirófanos lo acepta o lo rechaza con motivo
+CREATE TABLE cirugias_propuestas (
+    id              INTEGER PRIMARY KEY,
+    creada_por      INTEGER NOT NULL REFERENCES usuarios(id),
+    creada_en       TEXT NOT NULL,
+    estado          TEXT NOT NULL DEFAULT 'PENDIENTE'
+                    CHECK (estado IN ('PENDIENTE','ACEPTADA','RECHAZADA','REEMPLAZADA')),
+    respondida_por  INTEGER REFERENCES usuarios(id),
+    respondida_en   TEXT,
+    motivo          TEXT,
+    aplicadas       INTEGER,
+    CHECK (estado <> 'RECHAZADA' OR motivo IS NOT NULL)
+);
+CREATE TABLE cirugias_propuesta_items (
+    propuesta_id  INTEGER NOT NULL REFERENCES cirugias_propuestas(id),
+    solicitud_id  INTEGER NOT NULL REFERENCES cirugias_solicitudes(id),
+    fecha         TEXT NOT NULL,
+    hora          TEXT NOT NULL,
+    PRIMARY KEY (propuesta_id, solicitud_id)
+);
+
+-- El paciente pide una cita contando sus síntomas (portal o asistente); facturación la agenda y le escribe
+CREATE TABLE solicitudes_cita (
+    id            INTEGER PRIMARY KEY,
+    id_paciente   INTEGER NOT NULL REFERENCES pacientes_clinicos(id_paciente),
+    tipo          TEXT NOT NULL CHECK (tipo IN ('MEDICINA_GENERAL','ESPECIALISTA','CONTROL','RESULTADOS','OTRO')),
+    sintomas      TEXT NOT NULL,
+    preferencia   TEXT NOT NULL DEFAULT 'CUALQUIERA' CHECK (preferencia IN ('MANANA','TARDE','CUALQUIERA')),
+    telefono      TEXT,
+    canal         TEXT NOT NULL CHECK (canal IN ('PORTAL','ASISTENTE')),
+    estado        TEXT NOT NULL DEFAULT 'PENDIENTE' CHECK (estado IN ('PENDIENTE','AGENDADA','CERRADA','CANCELADA')),
+    creada_en     TEXT NOT NULL,
+    contactado_en TEXT,
+    cita_id       INTEGER REFERENCES citas(id),
+    respuesta     TEXT,
+    atendida_por  INTEGER REFERENCES usuarios(id),
+    atendida_en   TEXT,
+    CHECK (estado <> 'AGENDADA' OR cita_id IS NOT NULL),
+    CHECK (estado <> 'CERRADA' OR respuesta IS NOT NULL)
+);
+CREATE UNIQUE INDEX ux_solicitud_cita_pendiente ON solicitudes_cita(id_paciente) WHERE estado = 'PENDIENTE';
+CREATE TRIGGER trg_solicitudes_cita_no_delete BEFORE DELETE ON solicitudes_cita
+BEGIN SELECT RAISE(ABORT, 'Las solicitudes de cita no se eliminan'); END;
+
+-- Persona que no está registrada en el hospital: pide su registro; gerencia la cita para ir en persona
+CREATE TABLE solicitudes_registro (
+    id                INTEGER PRIMARY KEY,
+    nombres           TEXT NOT NULL,
+    apellidos         TEXT NOT NULL,
+    tipo_documento    TEXT NOT NULL,
+    numero_documento  TEXT NOT NULL,
+    correo            TEXT NOT NULL,
+    telefono          TEXT,
+    creada_en         TEXT NOT NULL,
+    estado            TEXT NOT NULL DEFAULT 'PENDIENTE' CHECK (estado IN ('PENDIENTE','CITADA','RECHAZADA')),
+    cita_fecha_hora   TEXT,
+    cita_lugar        TEXT,
+    respuesta         TEXT,
+    atendida_por      INTEGER REFERENCES usuarios(id),
+    atendida_en       TEXT,
+    CHECK (estado <> 'CITADA' OR (cita_fecha_hora IS NOT NULL AND cita_lugar IS NOT NULL)),
+    CHECK (estado <> 'RECHAZADA' OR respuesta IS NOT NULL)
+);
+CREATE UNIQUE INDEX ux_solicitud_registro_pendiente ON solicitudes_registro(numero_documento)
+    WHERE estado = 'PENDIENTE';
+CREATE TRIGGER trg_solicitudes_registro_no_delete BEFORE DELETE ON solicitudes_registro
+BEGIN SELECT RAISE(ABORT, 'Las solicitudes de registro no se eliminan'); END;
 
 -- -----------------------------------------------------------------------------
 -- 4. Datos semilla: roles y matriz de permisos
@@ -758,7 +827,10 @@ INSERT INTO permisos(codigo, descripcion) VALUES
  ('personal.turnos',            'Asignar turnos de trabajo al personal'),
  ('quirofanos.ver',             'Ver indicadores, lista de espera y programación de quirófanos'),
  ('quirofanos.solicitar',       'Solicitar cirugías y cancelar las propias en espera'),
- ('quirofanos.coordinar',       'Programar, reprogramar, cancelar y cerrar cirugías (coordinación de quirófanos)');
+ ('quirofanos.coordinar',       'Programar, reprogramar, cancelar y cerrar cirugías (coordinación de quirófanos)'),
+ ('quirofanos.proponer',        'Proponer a coordinación un calendario quirúrgico'),
+ ('camas.quirurgicas',          'Ocupar camas para pacientes con cirugía programada o reciente'),
+ ('registro.atender',           'Atender solicitudes de registro de personas nuevas');
 
 INSERT INTO rol_permisos(rol_id, permiso_id)
 SELECT r.id, p.id FROM roles r JOIN permisos p ON
@@ -766,7 +838,8 @@ SELECT r.id, p.id FROM roles r JOIN permisos p ON
                                              'auditoria.ver','inventario.auditar','farmacia.alertas.ver',
                                              'farmacia.orden_compra','camas.ver','pacientes.registrar',
                                              'hc.buscar','hc.ver_completa','hc.exportar','camas.gestionar',
-                                             'personal.turnos','quirofanos.ver'))
+                                             'personal.turnos','quirofanos.ver','quirofanos.proponer',
+                                             'registro.atender'))
   OR (r.codigo = 'DOCTOR'  AND p.codigo IN ('agente.consultar','farmacia.alertas.ver','camas.ver','hc.ver_completa',
                                              'hc.ver_notas','hc.acceso_emergencia','prescripcion.crear',
                                              'interconsulta.solicitar','pacientes.registrar','hc.registrar',
@@ -779,7 +852,7 @@ SELECT r.id, p.id FROM roles r JOIN permisos p ON
   OR (r.codigo = 'FACTURACION' AND p.codigo IN ('pacientes.registrar','citas.gestionar',
                                              'turnos_atencion.gestionar','camas.ver'))
   OR (r.codigo = 'QUIROFANOS' AND p.codigo IN ('quirofanos.ver','quirofanos.solicitar','quirofanos.coordinar',
-                                             'camas.ver'));
+                                             'camas.ver','camas.quirurgicas'));
 
 -- Versión del esquema: si una clinico.db vieja tiene otra, se respalda y se recrea (pharmacy_service)
-PRAGMA user_version = 9;
+PRAGMA user_version = 10;

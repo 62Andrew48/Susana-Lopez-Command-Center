@@ -137,7 +137,8 @@ def _signup() -> None:
                     st.session_state.su_step = 2
                     st.rerun()
             return
-        st.info(auth.SIGNUP_GENERIC)
+        st.info(auth.SIGNUP_GENERIC + " Si no te llega, puede que aún no estés registrado: pide tu registro en "
+                "“No estoy registrado en el hospital”.")
         demo = st.session_state.get("su_demo_code")
         if demo:
             st.warning(f"Modo demostración (sin correo configurado): tu código es **{demo}**")
@@ -164,6 +165,53 @@ def _signup() -> None:
             st.rerun()
 
 
+def _registration() -> None:
+    """Persona que no está en el hospital: pide su registro; gerencia la cita para ir en persona."""
+    import clinical_records as cr
+    import requests_service as rq
+    with st.expander("No estoy registrado en el hospital"):
+        mode = st.segmented_control("Opción", ["Pedir registro", "Consultar mi solicitud"], default="Pedir registro",
+                                    key="reg_mode", label_visibility="collapsed")
+        if mode == "Consultar mi solicitud":
+            with st.form("reg_status"):
+                doc = st.text_input("Número de documento", key="reg_s_doc")
+                mail = st.text_input("Correo", key="reg_s_mail")
+                if st.form_submit_button("Consultar", width="stretch"):
+                    row = rq.registration_status(ctx.get_clin(), doc, mail)
+                    if row is None:
+                        st.warning("No encontramos una solicitud con ese documento y ese correo.")
+                    elif row["estado"] == "PENDIENTE":
+                        st.info("Tu solicitud está en revisión. Te responderemos con el día y la hora para ir al "
+                                "hospital.")
+                    elif row["estado"] == "CITADA":
+                        when = row["cita_fecha_hora"]
+                        st.success(f"Te esperamos el **{when[8:10]}/{when[5:7]} a las {when[11:16]}** en "
+                                   f"**{row['cita_lugar']}** con tu documento de identidad original. Allí te "
+                                   "registran y te crean la cuenta." + (f" {row['respuesta']}" if row["respuesta"] else ""))
+                    else:
+                        st.error(f"Tu solicitud no fue aprobada: {row['respuesta']}")
+            return
+        st.caption("Déjanos tus datos. Gerencia te indicará qué día y a qué hora ir al hospital para registrarte y "
+                   "crear tu cuenta.")
+        with st.form("reg_request", clear_on_submit=False):
+            c1, c2 = st.columns(2)
+            nombres = c1.text_input("Nombres")
+            apellidos = c2.text_input("Apellidos")
+            c3, c4 = st.columns([1, 1.4])
+            tipo = c3.selectbox("Documento", list(cr.DOC_TYPES), format_func=lambda k: k)
+            doc = c4.text_input("Número")
+            mail = st.text_input("Correo")
+            phone = st.text_input("Celular (WhatsApp)")
+            if st.form_submit_button("Enviar solicitud", type="primary", width="stretch"):
+                try:
+                    rq.create_registration(ctx.get_clin(), nombres=nombres, apellidos=apellidos, tipo_documento=tipo,
+                                           numero_documento=doc, correo=mail, telefono=phone, now=ctx.clock())
+                    st.success("Recibimos tu solicitud. Consulta la respuesta aquí mismo (“Consultar mi solicitud”) "
+                               "o espera nuestro mensaje.")
+                except Exception as exc:
+                    st.error(str(exc))
+
+
 def login_page() -> None:
     st.markdown(f"""<style>
       [data-testid="stSidebar"], header[data-testid="stHeader"] {{display:none;}}
@@ -185,6 +233,7 @@ def login_page() -> None:
         st.error(st.session_state.login_error)
     _recovery()
     _signup()
+    _registration()
     with st.expander("Acceso rápido para la demostración"):
         st.caption("Cuentas de prueba del escenario sintético (contraseña: demo). Cada ingreso queda en la bitácora. "
                    "Otras: dr.paredes (pediatría), enf.castro (turno de noche).")
