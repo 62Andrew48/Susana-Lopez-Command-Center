@@ -87,3 +87,19 @@ def test_triage_queue_flags_level_two_over_target(conn):
 
 def test_triage_queue_empty_after_extract_ends(conn):
     assert db.triage_queue(conn, "2026-09-21 23:00:00", lookback_hours=6).empty
+
+
+# --- Enrutamiento del chat: ubicar camas vs. preguntas al agente -------------------
+@pytest.mark.parametrize("question, is_bed_lookup", [
+    ("¿Dónde hay camas libres para adultos?", True),
+    ("hay cama disponible en pediatria", True),
+    ("ubícame una cama para un recién nacido", True),
+    ("camas libres piso 2", True),
+    ("¿Cuántas camas de UCI están ocupadas hoy?", False),
+    ("Ocupación de camas por servicio", False),
+    ("¿Qué servicio tiene más pacientes ingresados este mes?", False),
+])
+def test_chat_routes_bed_lookups_to_bed_map(question, is_bed_lookup):
+    from ui.chat_bubble import _BED_Q, _norm
+    q = _norm(question)
+    assert bool(_BED_Q.search(q) and "ocupad" not in q) == is_bed_lookup

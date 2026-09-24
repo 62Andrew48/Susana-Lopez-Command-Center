@@ -15,6 +15,7 @@ import config
 import database as db
 import pharmacy_service as ps
 from agent import KEY_QUESTIONS, AgentResponse, fmt_minutes, fmt_num
+from ui import chat_bubble as chat
 from ui import context as ctx
 from ui.theme import (AMBER, ACTIVITY_SEQ, BLUE, BLUE_LIGHT, BORDER, EMERALD, GREY, MUTED, RED, SEVERITY,
                       banner, card, chip, esc, grid, kpi_card, occupancy_color, section_title, severity_pill,
@@ -269,7 +270,7 @@ def page_asistente() -> None:
     prompt = prompt or st.session_state.pop("pending", None)
     if prompt:
         with st.spinner("Consultando la base del hospital…"):
-            history.append((prompt, agent.ask(prompt)))
+            history.append((prompt, chat.ask(prompt)))  # incluye la intención de ubicar camas
     with chat_box:
         if not history:
             st.caption("Usa una de las 4 preguntas del reto o escribe la tuya.")

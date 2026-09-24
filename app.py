@@ -11,6 +11,7 @@ Estructura:
 
 Módulos:  ui/theme.py (estilo y componentes) · ui/context.py (sesión, RBAC, reloj)
           ui/pages_hoy.py (inicio por rol) · ui/pages_camas.py (mapa de camas por piso)
+          ui/chat_bubble.py (asistente IA flotante)
           ui/pages_analytics.py (Tablero, Asistente, Alertas, Datos) · ui/pages_clinical.py (Clínico, Portal)
 """
 from __future__ import annotations
@@ -21,6 +22,7 @@ import streamlit as st
 
 import config
 import demo_seed as ds
+from ui import chat_bubble as cb
 from ui import context as ctx
 from ui import pages_analytics as pa
 from ui import pages_camas as pm
@@ -112,4 +114,6 @@ if not sections:
 # Menú lateral agrupado (Operación · Clínico · Gestión). El paciente ve un menú plano, sin grupos.
 flat = [page for group in sections.values() for page in group]
 menu = flat if ctx.current_user()["rol"] == "PACIENTE" else sections
-st.navigation(menu, position="sidebar").run()
+page = st.navigation(menu, position="sidebar")
+page.run()
+cb.render(page.url_path)  # asistente IA flotante (abajo a la derecha), según permisos
