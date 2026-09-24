@@ -5,11 +5,12 @@ app.py — Punto de entrada de la interfaz (Streamlit ≥ 1.46).
 
 Estructura:
   * Cabecera contextual persistente: usuario (selector de demo), rol, turno, acceso de emergencia y reloj.
-  * Navegación superior por secciones filtrada por permisos (RBAC de clinico.db). st.navigation ejecuta
-    SOLO la página activa: cada interacción recalcula una sección, no todo el tablero.
+  * Menú lateral agrupado (Operación · Clínico · Gestión) filtrado por permisos (RBAC de clinico.db).
+    La página de inicio es "Hoy". st.navigation ejecuta SOLO la página activa.
   * Subsecciones dentro de cada página con st.tabs / st.expander.
 
 Módulos:  ui/theme.py (estilo y componentes) · ui/context.py (sesión, RBAC, reloj)
+          ui/pages_hoy.py (inicio por rol) · ui/pages_camas.py (mapa de camas por piso)
           ui/pages_analytics.py (Tablero, Asistente, Alertas, Datos) · ui/pages_clinical.py (Clínico, Portal)
 """
 from __future__ import annotations
@@ -22,7 +23,9 @@ import config
 import demo_seed as ds
 from ui import context as ctx
 from ui import pages_analytics as pa
+from ui import pages_camas as pm
 from ui import pages_clinical as pc
+from ui import pages_hoy as ph
 from ui.theme import chip, inject_css
 
 st.set_page_config(page_title="HSLV · Centro de mando operativo", page_icon="🏥", layout="wide")
@@ -83,28 +86,30 @@ st.markdown(f'<div class="ctx-chips">{"".join(chips)}</div>', unsafe_allow_html=
 # Navegación por permisos
 # ---------------------------------------------------------------------------
 P = ctx.permissions()
-CATALOG = [  # slug, título, icono, página, permisos que la habilitan (basta uno)
-    ("tablero", "Tablero", "📊", pa.page_tablero, {"tablero.gerencial.ver", "camas.ver"}),
-    ("asistente", "Asistente IA", "🤖", pa.page_asistente, {"agente.consultar"}),
-    ("alertas", "Alertas y acciones", "🚨", pa.page_alertas, {"farmacia.alertas.ver"}),
-    ("clinico", "Clínico y farmacia", "🩺", pc.page_clinico,
+CATALOG = [  # grupo del menú, slug, título, icono, página, permisos que la habilitan (basta uno)
+    ("Operación", "hoy", "Hoy", "🏠", ph.page_hoy, {"tablero.gerencial.ver", "camas.ver", "portal.propio"}),
+    ("Operación", "camas", "Mapa de camas", "🛏️", pm.page_camas, {"camas.ver"}),
+    ("Operación", "alertas", "Alertas y acciones", "🚨", pa.page_alertas, {"farmacia.alertas.ver"}),
+    ("Clínico", "clinico", "Clínico y farmacia", "🩺", pc.page_clinico,
      {"hc.ver_notas", "hc.ver_completa", "prescripcion.crear", "dispensacion.registrar"}),
-    ("portal", "Mi portal", "🧑", pc.page_portal, {"portal.propio"}),
-    ("datos", "Datos y auditoría", "🗂️", pa.page_datos, {"auditoria.ver"}),
+    ("Clínico", "portal", "Mis fórmulas y citas", "🧑", pc.page_portal, {"portal.propio"}),
+    ("Gestión", "tablero", "Indicadores", "📊", pa.page_tablero, {"tablero.gerencial.ver", "camas.ver"}),
+    ("Gestión", "asistente", "Asistente IA", "🤖", pa.page_asistente, {"agente.consultar"}),
+    ("Gestión", "datos", "Datos y auditoría", "🗂️", pa.page_datos, {"auditoria.ver"}),
 ]
-pages = []
+sections: dict[str, list] = {}
 ctx.PAGES.clear()
-for slug, title, icon, fn, needs in CATALOG:
+for group, slug, title, icon, fn, needs in CATALOG:
     if P & needs:
-        page = st.Page(fn, title=title, icon=icon, url_path=slug)
+        page = st.Page(fn, title=title, icon=icon, url_path=slug, default=slug == "hoy")
         ctx.PAGES[slug] = page
-        pages.append(page)
+        sections.setdefault(group, []).append(page)
 
-if not pages:
+if not sections:
     st.error("Tu cuenta no tiene secciones habilitadas. Contacta al administrador.")
     st.stop()
 
-if len(pages) == 1:  # p. ej. el paciente: una sola sección, sin barra de navegación vacía
-    st.markdown("<style>header[data-testid='stHeader']{background:transparent;border:none;}"
-                "[data-testid='stMainBlockContainer']{padding-top:1.6rem;}</style>", unsafe_allow_html=True)
-st.navigation(pages, position="top" if len(pages) > 1 else "hidden").run()
+# Menú lateral agrupado (Operación · Clínico · Gestión). El paciente ve un menú plano, sin grupos.
+flat = [page for group in sections.values() for page in group]
+menu = flat if ctx.current_user()["rol"] == "PACIENTE" else sections
+st.navigation(menu, position="sidebar").run()

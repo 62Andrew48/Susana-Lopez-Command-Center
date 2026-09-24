@@ -1,0 +1,196 @@
+"""
+ui/pages_camas.py — Mapa de camas por piso, habitación y unidad.
+
+La ubicación sale del código de cama del HIS (H-203C = piso 2, habitación 203, cama C; G-108B = piso 1,
+habitación 108, cama B). Las unidades sin ese patrón (UCI, intermedios, observación, recuperación) se muestran
+por unidad. El estado es el censo del día de corte, con la misma regla de ocupación del tablero.
+Las camas virtuales no se dibujan como camas: son la capacidad de expansión de cada unidad.
+"""
+from __future__ import annotations
+
+import streamlit as st
+
+import database as db
+from agent import fmt_num
+from ui import context as ctx
+from ui.theme import AMBER, BORDER, EMERALD, MUTED, RED, TEXT, chip, esc
+
+LONG_STAY_DAYS = 10
+POPULATIONS = ["Adultos", "Crítica adultos", "Pediátrica", "Neonatal", "Materna"]
+CRITICAL_WORDS = ("INTENSIV", "INTERMEDIO", "BASICO NEONATAL", "CUIDAD BASICO")
+
+CSS = f"""
+<style>
+  .map-legend {{display:flex; gap:1rem; flex-wrap:wrap; font-size:0.78rem; color:{MUTED}; margin:0.2rem 0 0.8rem;}}
+  .map-legend span {{display:inline-flex; align-items:center; gap:0.35rem;}}
+  .sw {{width:0.85rem; height:0.85rem; border-radius:3px; display:inline-block;}}
+  .unit-head {{display:flex; align-items:center; justify-content:space-between; gap:0.6rem; flex-wrap:wrap;
+      margin:0.9rem 0 0.5rem;}}
+  .unit-head b {{font-size:1rem; color:{TEXT};}}
+  .rooms {{display:grid; grid-template-columns:repeat(auto-fill, minmax(118px, 1fr)); gap:0.55rem;}}
+  .room {{background:#FFF; border:1px solid {BORDER}; border-radius:10px; padding:0.5rem 0.55rem;
+      box-shadow:0 1px 2px rgba(0,0,0,.04);}}
+  .room.has-free {{border-color:#6EE7B7; box-shadow:0 0 0 1px #A7F3D0;}}
+  .room-h {{display:flex; justify-content:space-between; align-items:baseline; font-size:0.78rem;
+      color:{MUTED}; margin-bottom:0.35rem;}}
+  .room-h b {{color:{TEXT}; font-size:0.86rem;}}
+  .beds {{display:flex; gap:0.3rem; flex-wrap:wrap;}}
+  .bed {{min-width:1.9rem; height:1.9rem; padding:0 0.3rem; border-radius:6px; display:inline-flex;
+      align-items:center; justify-content:center; font-size:0.74rem; font-weight:700; color:#FFF;
+      cursor:default;}}
+  .bed.free {{background:{EMERALD};}}
+  .bed.busy {{background:#EF4444;}}
+  .bed.long {{background:#B91C1C; outline:2px dashed {AMBER}; outline-offset:1px;}}
+  .unit-beds {{display:flex; gap:0.35rem; flex-wrap:wrap; background:#FFF; border:1px solid {BORDER};
+      border-radius:10px; padding:0.6rem;}}
+  .unit-beds .bed {{min-width:3.4rem;}}
+  .expansion {{font-size:0.78rem; color:{MUTED}; margin-top:0.35rem;}}
+  .found {{display:flex; flex-wrap:wrap; gap:0.45rem; margin:0.3rem 0 0.2rem;}}
+  .found span {{background:#ECFDF5; border:1px solid #A7F3D0; color:#065F46; border-radius:8px;
+      padding:0.35rem 0.6rem; font-size:0.84rem; font-weight:600;}}
+</style>
+"""
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _beds(day_iso: str):
+    from datetime import date
+    return db.bed_map(ctx.get_conn(), date.fromisoformat(day_iso))
+
+
+def _bed_html(r, label: str) -> str:
+    if r.ocupada:
+        long_stay = r.dias_estancia == r.dias_estancia and r.dias_estancia >= LONG_STAY_DAYS
+        tip = f"{r.ubicacion} · Ocupada · {fmt_num(r.dias_estancia, 1)} días de estancia"
+        if long_stay:
+            tip += " · revisar plan de egreso"
+        cls = "bed busy long" if long_stay else "bed busy"
+    else:
+        tip, cls = f"{r.ubicacion} · Libre", "bed free"
+    return f'<span class="{cls}" title="{esc(tip)}">{esc(label)}</span>'
+
+
+def _unit_header(name: str, phys, virt) -> str:
+    free = int((phys["ocupada"] == 0).sum())
+    pct = phys["ocupada"].mean() * 100 if len(phys) else 0
+    tone = "danger" if pct >= 95 else "warn" if pct >= 85 else "ok"
+    chips = [chip(f"{free} libres", "ok" if free else "danger"), chip(f"{fmt_num(pct, 1)} % ocupada", tone)]
+    return f'<div class="unit-head"><b>{esc(name)}</b><span>{" ".join(chips)}</span></div>'
+
+
+def _expansion_line(virt) -> str:
+    if virt.empty:
+        return ""
+    used = int(virt["ocupada"].sum())
+    return (f'<div class="expansion">Camas de expansión (virtuales): <b>{used}</b> en uso · '
+            f'<b>{len(virt) - used}</b> disponibles para habilitar</div>')
+
+
+def _render_floor(beds, floor: int, only_free: bool) -> None:
+    on_floor = beds[beds["piso"] == floor]
+    for unit, group in on_floor.groupby("unidad", sort=True):
+        phys = group[group["es_virtual"] == 0]
+        virt = beds[(beds["unidad"] == unit) & (beds["es_virtual"] == 1)]
+        rooms = []
+        for room, rb in phys.groupby("habitacion", sort=True):
+            free = int((rb["ocupada"] == 0).sum())
+            if only_free and not free:
+                continue
+            bed_html = "".join(_bed_html(r, r.cama if r.cama != "única" else "•") for r in rb.itertuples())
+            rooms.append(f'<div class="room{" has-free" if free else ""}"><div class="room-h"><b>Hab. {esc(room)}</b>'
+                         f'<span>{free} libre{"s" if free != 1 else ""}</span></div><div class="beds">{bed_html}</div></div>')
+        body = f'<div class="rooms">{"".join(rooms)}</div>' if rooms else \
+            '<div class="expansion">Sin habitaciones con camas libres.</div>'
+        st.markdown(_unit_header(unit, phys, virt) + body + _expansion_line(virt), unsafe_allow_html=True)
+
+
+def _render_units(beds, units: list[str], only_free: bool) -> None:
+    for unit in units:
+        group = beds[beds["unidad"] == unit]
+        phys, virt = group[group["es_virtual"] == 0], group[group["es_virtual"] == 1]
+        if phys.empty and virt.empty:
+            continue
+        shown = phys[phys["ocupada"] == 0] if only_free else phys
+        bed_html = "".join(_bed_html(r, r.codigo_cama) for r in shown.itertuples())
+        body = f'<div class="unit-beds">{bed_html}</div>' if bed_html else \
+            '<div class="expansion">Sin camas físicas libres en esta unidad.</div>'
+        st.markdown(_unit_header(unit, phys, virt) + body + _expansion_line(virt), unsafe_allow_html=True)
+
+
+def _finder(beds) -> None:
+    with st.container(border=True):
+        st.markdown("**¿Dónde hay una cama libre?**")
+        c1, c2 = st.columns([1, 1.4])
+        pop = c1.selectbox("Paciente", POPULATIONS, key="finder_pop",
+                           help="Solo se sugieren camas de unidades que atienden a esa población")
+        pool = beds[(beds["poblacion"] == pop) & (beds["servicio"] != "Urgencias")]
+        units = sorted(pool.loc[pool["es_virtual"] == 0, "unidad"].unique())
+        unit = c2.selectbox("Unidad (opcional)", ["Cualquiera"] + units, key="finder_unit")
+        if unit != "Cualquiera":
+            pool = pool[pool["unidad"] == unit]
+        free = pool[(pool["ocupada"] == 0) & (pool["es_virtual"] == 0)]
+        if free.empty:
+            virt = pool[(pool["es_virtual"] == 1) & (pool["ocupada"] == 0)]
+            st.markdown(chip("Sin camas físicas libres", "danger", "●") + " "
+                        + (f"Se pueden habilitar <b>{len(virt)}</b> camas de expansión en "
+                           f"{esc(', '.join(sorted(virt['unidad'].unique())[:3]))}." if not virt.empty
+                           else "Tampoco hay camas de expansión disponibles: coordinar remisión."),
+                        unsafe_allow_html=True)
+            return
+        st.markdown(f'<div class="found">{"".join(f"<span>🛏️ {esc(r.ubicacion)}</span>" for r in free.head(6).itertuples())}'
+                    f'</div>', unsafe_allow_html=True)
+        st.caption(f"{len(free)} camas físicas libres para población {pop.lower()}"
+                   + (" · se muestran primero las que tienen piso y habitación." if len(free) > 6 else "."))
+
+
+def page_camas() -> None:
+    if not ctx.can("camas.ver"):
+        st.error("Tu rol no tiene acceso al mapa de camas.")
+        st.stop()
+    st.markdown(CSS, unsafe_allow_html=True)
+    ref = ctx.ref_date()
+    beds = _beds(ref.isoformat())
+    inpatient = beds[beds["servicio"] != "Urgencias"]
+    phys = inpatient[inpatient["es_virtual"] == 0]
+    virt = inpatient[inpatient["es_virtual"] == 1]
+
+    st.markdown(f"### Mapa de camas · censo del {ref:%d/%m/%Y}")
+    st.markdown(" ".join([
+        chip(f"{int((phys['ocupada'] == 0).sum())} camas físicas libres", "ok", "●"),
+        chip(f"{int(phys['ocupada'].sum())} ocupadas de {len(phys)}", "neutral"),
+        chip(f"{int(virt['ocupada'].sum())} pacientes en camas de expansión", "warn", "▲"),
+    ]), unsafe_allow_html=True)
+
+    _finder(beds)
+
+    only_free = st.toggle("Mostrar solo lo que tiene camas libres", key="map_only_free")
+    st.markdown(f'<div class="map-legend"><span><i class="sw" style="background:{EMERALD}"></i>Libre</span>'
+                f'<span><i class="sw" style="background:#EF4444"></i>Ocupada</span>'
+                f'<span><i class="sw" style="background:#B91C1C;outline:2px dashed {AMBER}"></i>'
+                f'Estancia ≥ {LONG_STAY_DAYS} días (revisar egreso)</span>'
+                f'<span>Pasa el cursor sobre una cama para ver el detalle</span></div>', unsafe_allow_html=True)
+
+    floors = sorted(int(f) for f in beds["piso"].dropna().unique())
+    others = beds[beds["piso"].isna()]
+    critical = sorted(u for u, s in zip(others["unidad"], others["subgrupo_cama"])
+                      if any(w in str(s).upper() for w in CRITICAL_WORDS))
+    critical = list(dict.fromkeys(critical))
+    er = sorted(others.loc[others["servicio"] == "Urgencias", "unidad"].unique())
+    rest = sorted(set(others["unidad"]) - set(critical) - set(er))
+
+    labels = [f"Piso {f}" for f in floors] + ["Cuidado crítico", "Otras unidades", "Urgencias"]
+    tabs = st.tabs(labels)
+    for tab, f in zip(tabs, floors):
+        with tab:
+            _render_floor(beds, f, only_free)
+    with tabs[len(floors)]:
+        _render_units(beds, critical, only_free)
+    with tabs[len(floors) + 1]:
+        _render_units(beds, rest, only_free)
+    with tabs[len(floors) + 2]:
+        st.caption("Urgencias trabaja sobre todo con camas virtuales de observación: aquí se muestran las físicas.")
+        _render_units(beds, er, only_free)
+
+    st.caption("Piso y habitación se leen del código de cama del HIS (H-203C = piso 2, hab. 203, cama C). "
+               "Las unidades sin ese patrón (UCI, intermedios, observación) se muestran por unidad. El extracto no "
+               "trae pasillo ni ala; si el hospital los entrega, se agregan sin cambiar la vista.")

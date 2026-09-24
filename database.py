@@ -741,6 +741,123 @@ def compute_kpis(conn, start: date | None = None, end: date | None = None) -> di
     }
 
 
+# ---------------------------------------------------------------------------
+# Operación del día: ubicación de camas y cola de urgencias
+# ---------------------------------------------------------------------------
+# El código de cama del HIS trae el piso y la habitación en las alas de hospitalización:
+#   H-203C -> piso 2, habitación 203, cama C   ·   G-108B -> piso 1, habitación 108, cama B
+# Las demás unidades (UCI, intermedios, observación...) solo traen unidad + número de cama.
+_ROOM_CODE = re.compile(r"^([GH])-(\d)(\d{2})([A-Z]?)$")
+# Metas de oportunidad por nivel de triage (Resolución 5596 de 2015): I inmediata, II hasta 30 min.
+# Los niveles III a V no tienen meta nacional; cada institución define la suya.
+TRIAGE_TARGET_MIN = {1: 0, 2: config.WAIT_TARGET_TRIAGE2_MIN}
+
+
+def unit_label(subgroup: str | None) -> str:
+    """Nombre legible de la unidad ('UNIDAD DE CUIDAD BASICO NEONATAL' -> 'Unidad De Cuidado Basico Neonatal')."""
+    return str(subgroup or "Sin unidad").replace("CUIDAD ", "CUIDADO ").title()
+
+
+def bed_population(subgroup: str | None) -> str:
+    """Población que atiende la unidad: una cama libre solo sirve a pacientes compatibles."""
+    name = str(subgroup or "").upper()
+    if "NEONAT" in name:
+        return "Neonatal"
+    if "PEDIATR" in name:
+        return "Pediátrica"
+    if "GINECO" in name or "PARTO" in name:
+        return "Materna"
+    if "INTENSIV" in name or "INTERMEDIO" in name:
+        return "Crítica adultos"
+    if "RECUPERACION" in name:
+        return "Recuperación quirúrgica"   # posoperatorio inmediato: no recibe hospitalizaciones
+    return "Adultos"
+
+
+def bed_location(code: str | None, subgroup: str | None = None) -> dict:
+    """Piso, habitación y cama a partir del código del HIS. Sin patrón de habitación -> solo unidad."""
+    m = _ROOM_CODE.match(str(code or ""))
+    unit = unit_label(subgroup)
+    if not m:
+        return {"piso": None, "habitacion": None, "cama": code, "ubicacion": f"{unit} · Cama {code}"}
+    _, floor, room, letter = m.groups()
+    room_no = f"{floor}{room}"
+    bed = letter or "única"
+    return {"piso": int(floor), "habitacion": room_no, "cama": bed,
+            "ubicacion": f"Piso {floor} · Hab. {room_no} · Cama {bed}"}
+
+
+def bed_map(conn, day: date | None = None) -> pd.DataFrame:
+    """Estado de cada cama en el día (misma regla que ocupacion_diaria: una estancia estimada que se
+    cruza con el día ocupa la cama), con su ubicación física y la población que atiende."""
+    day = day or get_reference_date(conn)
+    lo, hi = day_bounds(day, day)
+    df = query_df(conn, """
+        SELECT c.codigo_cama, c.subgrupo_cama, c.servicio, c.es_virtual,
+               COUNT(i.oid_ingreso) AS pacientes, MIN(i.fecha_inicio_estancia) AS desde
+          FROM camas c
+          LEFT JOIN ingresos i ON i.codigo_cama = c.codigo_cama
+                              AND i.fecha_inicio_estancia <= ? AND i.fecha_fin_estimada >= ?
+         GROUP BY c.codigo_cama, c.subgrupo_cama, c.servicio, c.es_virtual""", (hi, lo))
+    loc = pd.DataFrame([bed_location(c, s) for c, s in zip(df["codigo_cama"], df["subgrupo_cama"])],
+                       index=df.index)
+    df = pd.concat([df, loc], axis=1)
+    df["unidad"] = df["subgrupo_cama"].map(unit_label)
+    df["poblacion"] = df["subgrupo_cama"].map(bed_population)
+    df["ocupada"] = (df["pacientes"] > 0).astype(int)
+    since = pd.to_datetime(df["desde"], errors="coerce")
+    df["dias_estancia"] = ((pd.Timestamp(hi) - since).dt.total_seconds() / 86400).round(1)
+    return df.drop(columns=["desde"]).sort_values(["piso", "habitacion", "cama", "codigo_cama"],
+                                                  na_position="last").reset_index(drop=True)
+
+
+def free_beds(conn, day: date | None = None, subgroup: str | None = None, population: str | None = None,
+              limit: int = 10) -> pd.DataFrame:
+    """Camas físicas libres de internación (sin Urgencias), primero las que tienen piso y habitación."""
+    beds = bed_map(conn, day)
+    beds = beds[(beds["ocupada"] == 0) & (beds["es_virtual"] == 0) & (beds["servicio"] != "Urgencias")]
+    if subgroup:
+        beds = beds[beds["subgrupo_cama"] == subgroup]
+    if population:
+        beds = beds[beds["poblacion"] == population]
+    return beds.head(limit).reset_index(drop=True)
+
+
+def _triage_area(classification: str | None) -> str:
+    """'PEDIATRIA URGENCIAS CONSULTORIO DOS-TRIAGE 2 (NARANJA)' -> 'Pediatria Urgencias Consultorio Dos'."""
+    text = re.split(r"-\s*TRIAGE", str(classification or ""), maxsplit=1, flags=re.I)[0]
+    return re.sub(r"\s+", " ", text).strip(" -").title() or "Sin clasificar"
+
+
+def triage_queue(conn, now: datetime | str, lookback_hours: int = 24) -> pd.DataFrame:
+    """Pacientes de urgencias que a la hora `now` ya ingresaron y aún no reciben la primera atención.
+    Sin identificadores: el código URG-xxxx es un resumen no reversible del ingreso."""
+    now = pd.Timestamp(now)
+    lo = (now - pd.Timedelta(hours=lookback_hours)).strftime(DATETIME_FMT)
+    hi = now.strftime(DATETIME_FMT)
+    cols = ["codigo", "nivel_triage", "area", "llegada", "espera_min", "meta_min", "fuera_de_meta",
+            "sexo", "grupo_etario"]
+    df = query_df(conn, """
+        SELECT i.oid_ingreso, i.fecha_ingreso, i.nivel_triage, i.clasificacion_triage, i.subgrupo_cama,
+               p.sexo, p.grupo_etario
+          FROM ingresos i LEFT JOIN pacientes p ON p.id_paciente = i.id_paciente
+         WHERE i.via_ingreso = 'Urgencias' AND i.fecha_ingreso BETWEEN ? AND ?
+           AND (i.fecha_atencion IS NULL OR i.fecha_atencion > ?)""", (lo, hi, hi))
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    arrival = pd.to_datetime(df["fecha_ingreso"])
+    df["codigo"] = df["oid_ingreso"].map(
+        lambda oid: "URG-" + hashlib.sha1(f"hslv-{oid}".encode()).hexdigest()[:4].upper())
+    df["espera_min"] = ((now - arrival).dt.total_seconds() / 60).round(0).astype(int)
+    df["llegada"] = arrival.dt.strftime("%H:%M")
+    df["area"] = [(_triage_area(c) if isinstance(c, str) else unit_label(s))
+                  for c, s in zip(df["clasificacion_triage"], df["subgrupo_cama"])]
+    df["meta_min"] = df["nivel_triage"].map(TRIAGE_TARGET_MIN)
+    df["fuera_de_meta"] = (df["meta_min"].notna() & (df["espera_min"] > df["meta_min"])).astype(int)
+    df = df.sort_values(["nivel_triage", "espera_min"], ascending=[True, False], na_position="last")
+    return df[cols].reset_index(drop=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ETL del HIS -> SQLite")
     parser.add_argument("--rebuild", action="store_true", help="Reconstruir la base desde cero")
