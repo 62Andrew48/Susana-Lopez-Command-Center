@@ -417,6 +417,6 @@ LLM opcional: OpenAI, Anthropic u Ollama.
 
 | Integrante | Rol |
 |---|---|
+| Andrés Felipe Garcés Campo | _(rol)_ |
+| Juan Camilo Perdomo Quira | _(rol)_ |
 | Sebastián Moncayo Ordoñez | Dirección del proyecto, experiencia por rol (Hoy, mapa de camas, notificaciones, asistente) |
-| _(nombre)_ | _(rol)_ |
-| _(nombre)_ | _(rol)_ |
