@@ -253,7 +253,6 @@ LLM opcional: OpenAI, Anthropic u Ollama.
 
 | Integrante | Rol |
 |---|---|
-| _(nombre)_ | Datos y ETL |
-| _(nombre)_ | Agente IA y seguridad |
-| _(nombre)_ | Tablero y experiencia de usuario |
-| _(nombre)_ | Documentación, pruebas y pitch |
+| Sebastián Moncayo Ordoñez | Datos, ETL, Agente IA y seguridad |
+| Juan Camilo Perdomo Quira | Tablero y experiencia de usuario |
+| Andrés Felipe Garcés Campo | Documentación, pruebas y pitch |
