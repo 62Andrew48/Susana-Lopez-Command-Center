@@ -13,10 +13,9 @@ import streamlit as st
 import database as db
 from agent import fmt_num
 from ui import context as ctx
-from ui.theme import AMBER, BORDER, EMERALD, MUTED, RED, TEXT, chip, esc
+from ui.theme import AMBER, BORDER, EMERALD, MUTED, TEXT, chip, esc
 
 LONG_STAY_DAYS = 10
-POPULATIONS = ["Adultos", "Crítica adultos", "Pediátrica", "Neonatal", "Materna"]
 CRITICAL_WORDS = ("INTENSIV", "INTERMEDIO", "BASICO NEONATAL", "CUIDAD BASICO")
 
 CSS = f"""
@@ -63,7 +62,7 @@ def _bed_html(r, label: str) -> str:
         long_stay = r.dias_estancia == r.dias_estancia and r.dias_estancia >= LONG_STAY_DAYS
         tip = f"{r.ubicacion} · Ocupada · {fmt_num(r.dias_estancia, 1)} días de estancia"
         if long_stay:
-            tip += " · revisar plan de egreso"
+            tip += " · revisar plan de salida"
         cls = "bed busy long" if long_stay else "bed busy"
     else:
         tip, cls = f"{r.ubicacion} · Libre", "bed free"
@@ -117,30 +116,28 @@ def _render_units(beds, units: list[str], only_free: bool) -> None:
         st.markdown(_unit_header(unit, phys, virt) + body + _expansion_line(virt), unsafe_allow_html=True)
 
 
+FINDER = {"Adulto": "Adultos", "UCI adulto": "Crítica adultos", "Niño": "Pediátrica",
+          "Recién nacido": "Neonatal", "Maternidad": "Materna"}
+
+
 def _finder(beds) -> None:
     with st.container(border=True):
         st.markdown("**¿Dónde hay una cama libre?**")
-        c1, c2 = st.columns([1, 1.4])
-        pop = c1.selectbox("Paciente", POPULATIONS, key="finder_pop",
-                           help="Solo se sugieren camas de unidades que atienden a esa población")
+        choice = st.pills("Para un paciente", list(FINDER), default="Adulto", key="finder_pop",
+                          label_visibility="collapsed")
+        pop = FINDER.get(choice or "Adulto")
         pool = beds[(beds["poblacion"] == pop) & (beds["servicio"] != "Urgencias")]
-        units = sorted(pool.loc[pool["es_virtual"] == 0, "unidad"].unique())
-        unit = c2.selectbox("Unidad (opcional)", ["Cualquiera"] + units, key="finder_unit")
-        if unit != "Cualquiera":
-            pool = pool[pool["unidad"] == unit]
         free = pool[(pool["ocupada"] == 0) & (pool["es_virtual"] == 0)]
         if free.empty:
             virt = pool[(pool["es_virtual"] == 1) & (pool["ocupada"] == 0)]
-            st.markdown(chip("Sin camas físicas libres", "danger", "●") + " "
-                        + (f"Se pueden habilitar <b>{len(virt)}</b> camas de expansión en "
-                           f"{esc(', '.join(sorted(virt['unidad'].unique())[:3]))}." if not virt.empty
-                           else "Tampoco hay camas de expansión disponibles: coordinar remisión."),
-                        unsafe_allow_html=True)
+            st.markdown(chip("No hay camas libres", "danger", "●") + " "
+                        + (f"Se pueden habilitar <b>{len(virt)}</b> camas de expansión." if not virt.empty
+                           else "Coordinar traslado a otra institución."), unsafe_allow_html=True)
             return
-        st.markdown(f'<div class="found">{"".join(f"<span>🛏️ {esc(r.ubicacion)}</span>" for r in free.head(6).itertuples())}'
+        st.markdown(f'<div class="found">{"".join(f"<span>🛏️ {esc(r.ubicacion)}</span>" for r in free.head(4).itertuples())}'
                     f'</div>', unsafe_allow_html=True)
-        st.caption(f"{len(free)} camas físicas libres para población {pop.lower()}"
-                   + (" · se muestran primero las que tienen piso y habitación." if len(free) > 6 else "."))
+        if len(free) > 4:
+            st.caption(f"y {len(free) - 4} más")
 
 
 def page_camas() -> None:
@@ -154,21 +151,21 @@ def page_camas() -> None:
     phys = inpatient[inpatient["es_virtual"] == 0]
     virt = inpatient[inpatient["es_virtual"] == 1]
 
-    st.markdown(f"### Mapa de camas · censo del {ref:%d/%m/%Y}")
+    st.markdown("### Camas")
     st.markdown(" ".join([
-        chip(f"{int((phys['ocupada'] == 0).sum())} camas físicas libres", "ok", "●"),
-        chip(f"{int(phys['ocupada'].sum())} ocupadas de {len(phys)}", "neutral"),
-        chip(f"{int(virt['ocupada'].sum())} pacientes en camas de expansión", "warn", "▲"),
-    ]), unsafe_allow_html=True)
+        chip(f"{int((phys['ocupada'] == 0).sum())} libres", "ok", "●"),
+        chip(f"{int(phys['ocupada'].sum())} ocupadas", "neutral", "●"),
+        chip(f"{int(virt['ocupada'].sum())} en expansión", "warn", "▲"),
+    ]) + f' <span class="muted">· datos del {ref:%d/%m/%Y}</span>', unsafe_allow_html=True)
 
     _finder(beds)
 
-    only_free = st.toggle("Mostrar solo lo que tiene camas libres", key="map_only_free")
-    st.markdown(f'<div class="map-legend"><span><i class="sw" style="background:{EMERALD}"></i>Libre</span>'
-                f'<span><i class="sw" style="background:#EF4444"></i>Ocupada</span>'
-                f'<span><i class="sw" style="background:#B91C1C;outline:2px dashed {AMBER}"></i>'
-                f'Estancia ≥ {LONG_STAY_DAYS} días (revisar egreso)</span>'
-                f'<span>Pasa el cursor sobre una cama para ver el detalle</span></div>', unsafe_allow_html=True)
+    legend, toggle = st.columns([3, 1.2], vertical_alignment="center")
+    legend.markdown(f'<div class="map-legend"><span><i class="sw" style="background:{EMERALD}"></i>Libre</span>'
+                    f'<span><i class="sw" style="background:#EF4444"></i>Ocupada</span>'
+                    f'<span><i class="sw" style="background:#B91C1C;outline:2px dashed {AMBER}"></i>'
+                    f'Más de {LONG_STAY_DAYS} días</span></div>', unsafe_allow_html=True)
+    only_free = toggle.toggle("Solo libres", key="map_only_free")
 
     floors = sorted(int(f) for f in beds["piso"].dropna().unique())
     others = beds[beds["piso"].isna()]
@@ -178,7 +175,7 @@ def page_camas() -> None:
     er = sorted(others.loc[others["servicio"] == "Urgencias", "unidad"].unique())
     rest = sorted(set(others["unidad"]) - set(critical) - set(er))
 
-    labels = [f"Piso {f}" for f in floors] + ["Cuidado crítico", "Otras unidades", "Urgencias"]
+    labels = [f"Piso {f}" for f in floors] + ["UCI y cuidados", "Otras", "Urgencias"]
     tabs = st.tabs(labels)
     for tab, f in zip(tabs, floors):
         with tab:
@@ -188,9 +185,13 @@ def page_camas() -> None:
     with tabs[len(floors) + 1]:
         _render_units(beds, rest, only_free)
     with tabs[len(floors) + 2]:
-        st.caption("Urgencias trabaja sobre todo con camas virtuales de observación: aquí se muestran las físicas.")
         _render_units(beds, er, only_free)
 
-    st.caption("Piso y habitación se leen del código de cama del HIS (H-203C = piso 2, hab. 203, cama C). "
-               "Las unidades sin ese patrón (UCI, intermedios, observación) se muestran por unidad. El extracto no "
-               "trae pasillo ni ala; si el hospital los entrega, se agregan sin cambiar la vista.")
+    with st.expander("¿De dónde sale esta información?"):
+        st.markdown("- **Piso y habitación** se leen del código de cama del sistema del hospital: H-203C = piso 2, "
+                    "habitación 203, cama C. Las unidades sin ese código (UCI, intermedios, observación) se "
+                    "muestran por unidad.\n"
+                    "- **Estado** de cada cama: censo del día de corte de los datos.\n"
+                    f"- **{LONG_STAY_DAYS} días o más** internado: conviene revisar el plan de salida.\n"
+                    "- **Camas de expansión:** capacidad adicional que el sistema registra como “virtual”.\n"
+                    "- Los datos no traen pasillo ni ala; si el hospital los entrega, se agregan a esta vista.")

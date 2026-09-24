@@ -5,24 +5,29 @@ ui/chat_bubble.py — Asistente IA flotante (burbuja abajo a la derecha, disponi
     el panel, no el tablero de fondo.
   * La conversación es la MISMA del Asistente IA (st.session_state.history[usuario]): lo que se pregunta
     en la burbuja aparece en la página y viceversa, y se conserva al navegar entre secciones.
-  * Solo la ven los roles con el permiso agente.consultar (Admin y Doctor). Enfermería y pacientes no.
+  * La ven todos los roles, con el alcance que dan sus permisos (ui/assistant_scope.py): Admin y Médico
+    consultan la base analítica completa; Enfermería, solo camas, farmacia y urgencias; el paciente, solo
+    sus fórmulas y citas. El SQL solo se muestra a quien tiene agente.consultar.
   * Antes del agente NL2SQL resuelve una intención propia: "¿dónde hay una cama libre?", con la ubicación
     física (piso, habitación y cama) que sale del mapa de camas.
 """
 from __future__ import annotations
 
 import re
+import time
 import unicodedata
 
 import streamlit as st
 
 import database as db
-from agent import KEY_QUESTIONS, AgentResponse
+from agent import AgentResponse
 from ui import context as ctx
+from ui import assistant_scope as scope_mod
 from ui.theme import BLUE, BORDER, MUTED, TEXT, esc, severity_pill
 
 PANEL_H = 430            # alto del hilo de mensajes (px)
-SHORT = ["🛏️ Camas UCI hoy", "💊 Medicamentos < 5 días", "⏱️ Espera urgencias", "🏥 Servicio con más ingresos"]
+SHORT = ["🛏️ Camas UCI hoy", "💊 Medicamentos < 5 días", "⏱️ Espera urgencias", "🏥 Servicio con más ingresos",
+         "🗺️ ¿Dónde hay camas libres para adultos?"]
 
 CSS = f"""
 <style>
@@ -95,17 +100,26 @@ def _bed_answer(question: str) -> AgentResponse | None:
     return resp
 
 
+def _scope():
+    return scope_mod.scope_for(ctx.permissions())
+
+
 def ask(question: str) -> AgentResponse:
-    """Punto único de entrada del chat (burbuja y página): mapa de camas o agente NL2SQL."""
-    local = _bed_answer(question)
-    return local if local is not None else ctx.get_agent().ask(question)
+    """Punto único de entrada del chat (burbuja y página). El alcance depende de los permisos del usuario."""
+    user = ctx.current_user()
+    t0 = time.time()
+    resp = scope_mod.answer(question, _scope(), agent=ctx.get_agent(), bed_answer=_bed_answer, clin=ctx.get_clin(),
+                            id_paciente=user.get("id_paciente"), now=ctx.clock())
+    resp.elapsed_ms = resp.elapsed_ms or int((time.time() - t0) * 1000)
+    return resp
 
 
 # ---------------------------------------------------------------------------
 # Render compacto de una respuesta
 # ---------------------------------------------------------------------------
-ENGINE_SHORT = {"llm": "🧠 LLM", "reglas": "🛡️ Plan B · SQL validado", "reglas (respaldo)": "🛟 Plan B de respaldo",
-                "seguridad": "⛔ Bloqueado", "sql directo": "⌨️ SQL validado", "mapa de camas": "🛏️ Mapa de camas"}
+ENGINE_SHORT = {"llm": "🧠 IA", "reglas": "✓ Respuesta verificada", "reglas (respaldo)": "✓ Respuesta verificada",
+                "seguridad": "⛔ Bloqueado", "sql directo": "⌨️ Consulta validada", "mapa de camas": "🛏️ Mapa de camas",
+                "glosario": "📖 Glosario", "mis datos": "🔒 Solo tus datos", "fuera de alcance": "🔒 Acceso limitado"}
 
 
 def _render(resp: AgentResponse, idx: int) -> None:
@@ -122,7 +136,7 @@ def _render(resp: AgentResponse, idx: int) -> None:
             st.dataframe(resp.data.head(8), hide_index=True, width="stretch",
                          height=min(36 * min(len(resp.data), 8) + 40, 260), key=f"ia_df_{ctx.user_id()}_{idx}")
     meta = f"{ENGINE_SHORT.get(resp.engine, resp.engine)} · {resp.elapsed_ms} ms"
-    if resp.sql:
+    if resp.sql and _scope().can_see_sql:
         with st.expander(meta + " · ver SQL"):
             st.code(resp.sql, language="sql")
     else:
@@ -142,9 +156,9 @@ def _bubble() -> None:
     if is_open:
         with st.container(key="ia_panel"):
             head, close = st.columns([5, 1], vertical_alignment="center")
+            scope = _scope()
             head.markdown('<div class="ia-head"><div class="ia-logo">IA</div><div><b>Asistente HSLV</b>'
-                          '<small>Consulta los datos del hospital en lenguaje natural · solo lectura</small>'
-                          '</div></div>', unsafe_allow_html=True)
+                          f'<small>{esc(scope.subtitle)}</small></div></div>', unsafe_allow_html=True)
             if close.button("✕", key="ia_close", help="Cerrar"):
                 st.session_state.ia_open = False
                 st.rerun(scope="fragment")
@@ -153,13 +167,11 @@ def _bubble() -> None:
             with thread:
                 if not history:
                     st.markdown(f'<div class="ia-bot" style="background:#F1F5F9;color:{TEXT}">Hola 👋 Soy el asistente '
-                                'del HSLV. Pregúntame por camas, urgencias, farmacia o quirófanos. Por ejemplo:</div>',
-                                unsafe_allow_html=True)
-                    for i, (label, q) in enumerate(zip(SHORT, KEY_QUESTIONS)):
+                                'del HSLV. Puedes preguntarme, por ejemplo:</div>', unsafe_allow_html=True)
+                    for i, q in enumerate(scope.suggestions):
+                        label = SHORT[i] if scope.code == "completo" and i < len(SHORT) else q
                         if st.button(label, key=f"ia_sug_{i}", help=q, width="stretch"):
                             st.session_state.ia_pending = q
-                    if st.button("🗺️ ¿Dónde hay camas libres para adultos?", key="ia_sug_beds", width="stretch"):
-                        st.session_state.ia_pending = "¿Dónde hay camas libres para adultos?"
                 for i, (question, resp) in enumerate(history):
                     st.markdown(f'<div class="ia-me">{esc(question)}</div>', unsafe_allow_html=True)
                     with st.chat_message("assistant", avatar="🏥"):
@@ -169,7 +181,7 @@ def _bubble() -> None:
             if prompt:
                 with thread:
                     st.markdown(f'<div class="ia-me">{esc(prompt)}</div>', unsafe_allow_html=True)
-                    with st.spinner("Consultando la base del hospital…"):
+                    with st.spinner("Buscando la respuesta…"):
                         history.append((prompt, ask(prompt)))
                 st.rerun(scope="fragment")
             if history:
@@ -186,8 +198,8 @@ def _bubble() -> None:
 
 
 def render(current_slug: str | None) -> None:
-    """Dibuja la burbuja si el rol puede consultar al agente y no está ya en la página del Asistente."""
-    if not ctx.can("agente.consultar") or current_slug == "asistente":
+    """Dibuja la burbuja para todo usuario con algún alcance, salvo en la página del Asistente (evita duplicarlo)."""
+    if _scope().code == "ninguno" or current_slug == "asistente":
         return
     st.markdown(CSS, unsafe_allow_html=True)
     _bubble()

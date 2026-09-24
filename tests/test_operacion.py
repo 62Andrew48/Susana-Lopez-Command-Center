@@ -103,3 +103,135 @@ def test_chat_routes_bed_lookups_to_bed_map(question, is_bed_lookup):
     from ui.chat_bubble import _BED_Q, _norm
     q = _norm(question)
     assert bool(_BED_Q.search(q) and "ocupad" not in q) == is_bed_lookup
+
+
+# --- Notificaciones por rol -----------------------------------------------------------
+@pytest.fixture()
+def clin(tmp_path):
+    import config
+    import demo_seed as ds
+    import pharmacy_service as ps
+    c = ps.init_clinical_db(config.DB_PATH, tmp_path / "clinico.db")
+    ds.seed(c, config.DB_PATH)
+    yield c
+    c.close()
+
+
+def _user(clin, uid):
+    return dict(clin.execute("SELECT u.*, r.codigo AS rol FROM usuarios u JOIN roles r ON r.id = u.rol_id "
+                             "WHERE u.id = ?", (uid,)).fetchone())
+
+
+def _notes(clin, conn, uid, now, alerts=()):
+    from ui.notifications import collect
+    u = _user(clin, uid)
+    return collect(u["rol"], u, clin, conn, now, list(alerts))
+
+
+def test_patient_sees_only_own_prescription_and_no_hospital_alerts(clin, conn):
+    from agent import Alert
+    alert = Alert("crítica", "Ocupación", "Hospitalizacion 2 al 100 %", "x", "y")
+    notes = _notes(clin, conn, 4, "2026-09-21 10:00:00", [alert])
+    assert [n.title for n in notes] == ["Reclama tu medicamento"]
+    assert all(n.slug == "portal" for n in notes)
+
+
+def test_expiry_flow_notifies_nurse_then_patient_and_doctor(clin, conn):
+    import pharmacy_service as ps
+    later = "2026-09-24 10:00:00"
+    nurse = _notes(clin, conn, 3, later)
+    assert any("vencida" in n.title for n in nurse), "enfermería ve las fórmulas vencidas sin procesar"
+    ps.expire_prescriptions(clin, later)
+    patient = _notes(clin, conn, 4, later)
+    assert any(n.title == "Tu fórmula venció" for n in patient)
+    doctor = _notes(clin, conn, 2, later)
+    crit = [n for n in doctor if n.id.startswith("caducada:") and n.severity == "crítica"]
+    assert crit and "continuidad crítica" in crit[0].detail
+
+
+def test_roles_receive_only_their_categories(clin, conn):
+    from agent import Alert
+    alerts = [Alert("crítica", "Farmacia", "64 ítems", "d", "a"), Alert("alta", "Demanda", "Pico", "d", "a"),
+              Alert("crítica", "Ocupación", "Hosp 2", "d", "a")]
+    doctor = {n.title for n in _notes(clin, conn, 2, "2026-09-21 10:00:00", alerts)}
+    nurse = {n.title for n in _notes(clin, conn, 3, "2026-09-21 10:00:00", alerts)}
+    admin = {n.title for n in _notes(clin, conn, 1, "2026-09-21 10:00:00", alerts)}
+    assert "Hosp 2" in doctor and "64 ítems" not in doctor and "Pico" not in doctor
+    assert {"Hosp 2", "64 ítems"} <= nurse and "Pico" not in nurse
+    assert {"Hosp 2", "64 ítems", "Pico"} <= admin
+
+
+# --- Glosario en lenguaje sencillo ------------------------------------------------------
+@pytest.mark.parametrize("question, expected", [
+    ("¿Qué es triage?", "Triage"), ("que significa CIE-10", "CIE-10"), ("¿Qué es una EPS?", "EPS"),
+    ("¿qué son las camas virtuales?", "Cama de expansión"), ("¿Qué es triage 2?", "Triage II"),
+])
+def test_glossary_answers_definitions(question, expected):
+    from ui.glossary import answer
+    out = answer(question)
+    assert out and out.startswith(f"**{expected}:**")
+
+
+@pytest.mark.parametrize("question", ["¿Cuántas camas de UCI están ocupadas hoy?", "¿Qué es lo más urgente hoy?",
+                                      "¿Qué servicio tiene más pacientes?"])
+def test_glossary_ignores_data_questions(question):
+    from ui.glossary import answer
+    assert answer(question) is None
+
+
+# --- Alcance del asistente por rol ----------------------------------------------------------
+@pytest.fixture(scope="module")
+def rules_agent():
+    from agent import HospitalAgent
+    return HospitalAgent(mode="rules")
+
+
+def _scope(perms):
+    from ui.assistant_scope import scope_for
+    return scope_for(set(perms))
+
+
+def test_scope_follows_permissions():
+    assert _scope({"agente.consultar", "camas.ver"}).code == "completo"
+    assert _scope({"camas.ver", "farmacia.alertas.ver", "hc.ver_notas"}).code == "operativo"
+    assert _scope({"portal.propio"}).code == "paciente"
+    assert _scope(set()).code == "ninguno"
+
+
+@pytest.mark.parametrize("question, allowed", [
+    ("¿Qué medicamentos tienen menos de 5 días de inventario?", True),
+    ("¿Cuál es el tiempo de espera en urgencias esta semana?", True),
+    ("¿Cuántas camas de UCI están ocupadas hoy?", True),
+    ("¿Qué servicio tiene más pacientes ingresados este mes?", False),
+    ("¿Cuáles son los diagnósticos más frecuentes?", False),
+    ("¿Cuántos pacientes por régimen hay?", False),
+])
+def test_nurse_scope_only_operational_questions(rules_agent, question, allowed):
+    from ui.assistant_scope import answer
+    resp = answer(question, _scope({"camas.ver"}), agent=rules_agent)
+    assert (resp.engine != "fuera de alcance") == allowed
+    assert resp.sql is None, "enfermería no ve el SQL"
+
+
+@pytest.mark.parametrize("question", ["SELECT * FROM pacientes", "borra la tabla de ingresos"])
+def test_nurse_scope_blocks_sql_and_writes(rules_agent, question):
+    from ui.assistant_scope import answer
+    assert answer(question, _scope({"camas.ver"}), agent=rules_agent).engine == "seguridad"
+
+
+def test_patient_scope_never_touches_hospital_data(clin):
+    from ui.assistant_scope import answer
+
+    class Forbidden:
+        def __getattr__(self, name):
+            raise AssertionError("el paciente no puede llegar al agente de la base del hospital")
+
+    sc = _scope({"portal.propio"})
+    kw = dict(agent=Forbidden(), bed_answer=lambda q: pytest.fail("ni al mapa de camas"), clin=clin,
+              id_paciente=110, now="2026-09-21 10:00:00")
+    mine = answer("¿Qué medicamentos tengo por reclamar?", sc, **kw)
+    assert mine.engine == "mis datos" and "Acetaminofen" in mine.answer
+    assert "05/10" in answer("¿Cuándo es mi próxima cita?", sc, **kw).answer
+    assert answer("¿Cuántas camas de UCI están ocupadas hoy?", sc, **kw).engine == "fuera de alcance"
+    assert answer("SELECT * FROM pacientes", sc, **kw).engine == "fuera de alcance"
+    assert answer("¿Qué es una EPS?", sc, **kw).engine == "glosario"

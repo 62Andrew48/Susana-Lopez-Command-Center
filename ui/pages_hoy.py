@@ -9,19 +9,18 @@ El histórico (tendencias, epidemiología) vive en "Indicadores"; aquí solo va 
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
-import config
 import database as db
 import pharmacy_service as ps
 from agent import fmt_minutes, fmt_num
 from ui import context as ctx
-from ui.theme import (AMBER, BLUE, BORDER, EMERALD, MUTED, RED, SEVERITY, TEXT, chip, esc, occupancy_color,
-                      severity_pill, show, style_fig)
+from ui.glossary import tip
+from ui.theme import AMBER, BLUE, BORDER, EMERALD, MUTED, RED, TEXT, esc, occupancy_color
 
 FMT = "%Y-%m-%d %H:%M:%S"
 DAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
@@ -146,12 +145,12 @@ def page_hoy() -> None:
 
 
 def _staff_today() -> None:
+    """Lo esencial del turno: 4 cifras, lo que hay que hacer ahora y quién espera en urgencias."""
     ref, now = ctx.ref_date(), _now()
     user = ctx.current_user()
-    role = user["rol"]
-    st.markdown(f'<div class="today-head"><div><h2>Hoy, {esc(_long_date(ref))}</h2>'
-                f'<p>Lo que requiere acción en este momento · reloj clínico {now:%H:%M}</p></div></div>',
-                unsafe_allow_html=True)
+    first = user["nombre_mostrado"].split("·")[0].strip()
+    st.markdown(f'<div class="today-head"><div><h2>Hola, {esc(first)}</h2>'
+                f'<p>{esc(_long_date(ref)).capitalize()} · {now:%H:%M}</p></div></div>', unsafe_allow_html=True)
 
     occ, occ_prev = _physical_occupancy(ref), _physical_occupancy(ref - timedelta(days=1))
     w7 = ctx.cached("kpi_wait_times", ref - timedelta(days=6), ref)
@@ -160,197 +159,93 @@ def _staff_today() -> None:
     alerts = ctx.get_agent().alerts()
     critical = [a for a in alerts if a.severity == "crítica"]
 
-    # --- 1. Cuatro indicadores del día ---
+    # --- 1. Cuatro cifras ---
     d_occ = occ["pct"] - occ_prev["pct"]
     occ_color = occupancy_color(occ["pct"])
     avg, prev_avg = w7["promedio_min"], w7_prev["promedio_min"]
-    wait_delta = f"{avg - prev_avg:+.0f} min vs. semana previa" if avg and prev_avg else None
-    t2 = w7["por_triage"].query("triage == 'Triage 2'")
-    t2_txt = f"Triage II: {fmt_minutes(t2['espera_promedio_min'].iat[0])} · meta {fmt_num(config.WAIT_TARGET_TRIAGE2_MIN)} min" \
-        if not t2.empty else "Sin atenciones Triage II"
     levels = queue["nivel_triage"].value_counts() if not queue.empty else {}
     n_q = len(queue)
-    queue_bar = _bar([(levels.get(k, 0) / n_q if n_q else 0, TRIAGE_COLOR[k]) for k in (1, 2, 3, 4, 5)])
-    queue_foot = " · ".join(f"{int(levels.get(k, 0))} T{ROMAN[k]}" for k in (1, 2, 3, 4) if levels.get(k, 0)) \
-        or "Sin pacientes en espera"
-    cats = sorted({a.category for a in critical})
+    urgent = int(levels.get(1, 0) + levels.get(2, 0)) if n_q else 0
     st.markdown('<div class="stat-grid">' + "".join([
-        _stat("Ocupación de camas físicas", f"{fmt_num(occ['pct'], 1)} %", f"({occ['ocupadas']}/{occ['capacidad']})",
-              "🛏️", occ_color, "#EFF6FF", _bar([(occ["pct"] / 100, occ_color)]),
-              f"{occ['libres']} libres · {occ['expansion_en_uso']} en camas de expansión",
-              f"{d_occ:+.1f} pts vs. ayer", d_occ <= 0),
-        _stat("Espera en urgencias · 7 días", fmt_minutes(avg), "", "⏱️", AMBER, "#FFF7ED",
-              _bar([(min((avg or 0) / 120, 1), AMBER)]), t2_txt, wait_delta,
-              bool(avg and prev_avg and avg <= prev_avg)),
-        _stat("Pacientes esperando atención", fmt_num(n_q), "en urgencias", "🚑", RED if levels.get(1, 0) or
-              levels.get(2, 0) else BLUE, "#FEF2F2", queue_bar, queue_foot),
-        _stat("Alertas críticas", fmt_num(len(critical)), "activas", "⚠️", RED if critical else EMERALD, "#FEF9C3",
+        _stat("Camas ocupadas", f"{fmt_num(occ['pct'], 1)} %", "", "🛏️", occ_color, "#EFF6FF",
+              _bar([(occ["pct"] / 100, occ_color)]), f"{occ['libres']} camas libres",
+              f"{d_occ:+.1f} vs. ayer", d_occ <= 0),
+        _stat("Espera en urgencias", fmt_minutes(avg), "", "⏱️", AMBER, "#FFF7ED",
+              _bar([(min((avg or 0) / 120, 1), AMBER)]), "promedio de los últimos 7 días",
+              f"{avg - prev_avg:+.0f} min" if avg and prev_avg else None, bool(avg and prev_avg and avg <= prev_avg)),
+        _stat("Esperando atención", fmt_num(n_q), "pacientes", "🚑", RED if urgent else BLUE, "#FEF2F2",
+              _bar([(levels.get(k, 0) / n_q if n_q else 0, TRIAGE_COLOR[k]) for k in (1, 2, 3, 4, 5)]),
+              f"{urgent} urgentes (triage I–II)" if urgent else "ninguno urgente"),
+        _stat("Alertas críticas", fmt_num(len(critical)), "", "⚠️", RED if critical else EMERALD, "#FEF9C3",
               _bar([(min(len(critical) / 5, 1), RED if critical else EMERALD)]),
-              " · ".join(cats) if cats else "Operación sin alertas críticas"),
+              "detalle abajo" if critical else "todo en orden"),
     ]) + "</div>", unsafe_allow_html=True)
 
-    if role == "ADMIN":
-        # Gerencia: primero las decisiones (alertas con acción) y la presión de urgencias
-        left, right = st.columns([1.35, 1], gap="large")
-        with left:
-            _actions(alerts, role)
-        with right:
-            _queue_panel(queue, now)
-        left, right = st.columns([1.35, 1], gap="large")
-        with left:
-            _saturation(ref)
-        with right:
-            _role_todo(role, queue, occ, per_row=2)
-    else:
-        # Personal asistencial: primero su trabajo del turno, luego la cola y el contexto del hospital
-        _role_todo(role, queue, occ, per_row=4)
-        left, right = st.columns([1, 1.35], gap="large")
-        with left:
-            _queue_panel(queue, now)
-        with right:
-            _actions(alerts, role)
-        _saturation(ref)
+    left, right = st.columns([1.3, 1], gap="large")
+    with left:
+        _do_now(user, alerts)
+    with right:
+        _queue_panel(queue, now)
 
 
 # ---------------------------------------------------------------------------
 # Bloques del personal
 # ---------------------------------------------------------------------------
-def _actions(alerts, role: str) -> None:
-    st.markdown("#### Requiere acción ahora")
-    wanted = {"ADMIN": {"Ocupación", "Farmacia", "Urgencias", "Demanda", "Cirugías"},
-              "DOCTOR": {"Ocupación", "Urgencias", "Farmacia"},
-              "ENFERMERIA": {"Ocupación", "Farmacia", "Urgencias"}}.get(role, set())
-    top = [a for a in alerts if a.severity in ("crítica", "alta") and a.category in wanted][:3]
-    if not top:
-        st.success("Sin alertas críticas ni altas en este momento.", icon="✅")
+SEV_COLOR = {"crítica": RED, "alta": "#EA580C", "media": "#CA8A04", "info": BLUE}
+
+
+def _do_now(user: dict, alerts) -> None:
+    """Qué hacer ahora: las mismas notificaciones de la campana, en orden de gravedad, con su botón."""
+    from ui.notifications import collect
+    st.markdown("#### Qué hacer ahora")
+    items = collect(user["rol"], user, ctx.get_clin(), ctx.get_conn(), ctx.clock(), alerts)
+    if user["rol"] != "ADMIN":  # médico y enfermería: primero sus tareas del turno, luego el contexto del hospital
+        items = [n for n in items if not n.id.startswith("alerta:")] + [n for n in items if n.id.startswith("alerta:")]
+    items = items[:5]
+    if not items:
+        st.success("Todo al día. No hay nada pendiente para tu rol.", icon="✅")
         return
     beds = _beds(ctx.ref_date().isoformat())
-    for i, a in enumerate(top):
+    for i, n in enumerate(items):
+        hint = n.detail.split(". ")[0].split(", priorizar")[0].rstrip(".")
+        if n.slug == "camas":  # ocupación: la cama libre compatible ya ubicada
+            unit = next((u for u in beds["subgrupo_cama"].unique() if n.title.startswith(str(u).title())), None)
+            if unit is not None:
+                free = beds[(beds["ocupada"] == 0) & (beds["es_virtual"] == 0) & (beds["servicio"] != "Urgencias")
+                            & (beds["poblacion"] == db.bed_population(unit))]
+                hint = f"Cama libre más cercana: {free.iloc[0]['ubicacion']}" if not free.empty else \
+                    "Sin camas libres compatibles: habilitar camas de expansión"
         with st.container(border=True):
-            detail = a.detail if len(a.detail) <= 170 else a.detail[:167].rsplit(" ", 1)[0] + "…"
-            st.markdown(f'{severity_pill(a.severity)} <span class="muted">{esc(a.category)}</span><br>'
-                        f'<b>{esc(a.title)}</b><br><span class="muted">{esc(detail)}</span>'
-                        f'<div class="alert-action" style="margin-top:0.4rem"><b>Acción:</b> {esc(a.action)}</div>',
-                        unsafe_allow_html=True)
-            if a.category == "Ocupación":
-                unit = next((u for u in beds["subgrupo_cama"].unique() if a.title.startswith(str(u).title())), None)
-                if unit is not None:
-                    pop = db.bed_population(unit)
-                    free = beds[(beds["ocupada"] == 0) & (beds["es_virtual"] == 0) & (beds["poblacion"] == pop)]
-                    if free.empty:
-                        st.markdown(f'<div class="bed-sug">Sin camas físicas libres para población '
-                                    f'{esc(pop.lower())}: habilitar camas de expansión.</div>', unsafe_allow_html=True)
-                    else:
-                        where = " · ".join(f"<b>{esc(r.ubicacion)}</b>" for r in free.head(3).itertuples())
-                        st.markdown(f'<div class="bed-sug">🛏️ Camas libres compatibles ({esc(pop.lower())}): '
-                                    f'{where}</div>', unsafe_allow_html=True)
-                _link("camas", "Ver en el mapa de camas", "🗺️")
-            elif a.category == "Farmacia":
-                _link("alertas", "Abrir semáforo y orden de compra", "💊")
-            else:
-                _link("alertas", "Ver acciones recomendadas", "🧭")
-    _link("alertas", "Ver todas las alertas", "🚨")
+            text, btn = st.columns([3.5, 1.5], vertical_alignment="center")
+            title = re.sub(r"\s*\(.*?\)", "", n.title)
+            text.markdown(f'<span style="color:{SEV_COLOR.get(n.severity, MUTED)}">●</span> <b>{esc(title)}</b>'
+                          f'<br><span class="muted">{esc(hint)}</span>', unsafe_allow_html=True)
+            if n.slug in ctx.PAGES:
+                btn.page_link(ctx.PAGES[n.slug], label=n.link_label)
 
 
 def _queue_panel(queue, now: datetime) -> None:
-    st.markdown("#### Cola de urgencias")
-    st.caption(f"Pacientes que llegaron y aún no reciben la primera atención a las {now:%H:%M} del "
-               f"{now:%d/%m}. Orden: nivel de triage y tiempo de espera.")
+    st.markdown("#### Urgencias ahora")
     if queue.empty:
-        st.info("Nadie espera atención en este momento del reloj clínico. El extracto del HIS llega hasta el "
-                "21/09 a las 14:33: cambia la hora en el 🕒 Reloj de demo.")
+        st.info(f"Nadie espera atención a las {now:%H:%M}. Los datos del hospital llegan hasta el 21/09 a las 14:33.")
         return
     rows = []
-    for r in queue.head(6).itertuples():
+    for r in queue.head(5).itertuples():
         lvl = int(r.nivel_triage) if pd.notna(r.nivel_triage) else None
         color, bg = TRIAGE_COLOR.get(lvl, MUTED), TRIAGE_BG.get(lvl, "#F3F4F6")
-        tag = f"Triage {ROMAN[lvl]}" if lvl else "Sin triage"
-        late = bool(r.fuera_de_meta)
-        wait_color = RED if late else (AMBER if r.espera_min >= 30 else EMERALD)
-        age = f" · {esc(r.grupo_etario)}" if isinstance(r.grupo_etario, str) else ""
+        tag = tip(f"Triage {ROMAN[lvl]}" if lvl in (1, 2) else "triage", f"Triage {ROMAN[lvl]}") if lvl else "Sin triage"
+        wait_color = RED if r.fuera_de_meta else (AMBER if r.espera_min >= 30 else EMERALD)
+        area = str(r.area).split(" Consultorio")[0]
         rows.append(
-            f'<div class="q-row"><div class="q-av">👤</div><div class="q-main">'
-            f'<span class="q-code">{esc(r.codigo)}</span>'
+            f'<div class="q-row"><div class="q-main"><span class="q-code">{esc(r.codigo)}</span>'
             f'<span class="q-tag" style="color:{color};background:{bg}">{tag}</span>'
-            f'<div class="q-sub">{esc(r.area)}{age} · llegó {esc(r.llegada)}</div></div>'
-            f'<div class="q-wait"><small>{"Fuera de meta" if late else "Espera"}</small>'
-            f'<b style="color:{wait_color}">{fmt_minutes(r.espera_min)}</b></div></div>')
+            f'<div class="q-sub">{esc(area)} · llegó {esc(r.llegada)}</div></div>'
+            f'<div class="q-wait"><b style="color:{wait_color}">{fmt_minutes(r.espera_min)}</b></div></div>')
     st.markdown("".join(rows), unsafe_allow_html=True)
-    if len(queue) > 6:
-        with st.expander(f"Ver los {len(queue) - 6} pacientes restantes"):
-            st.dataframe(queue.iloc[6:][["codigo", "nivel_triage", "area", "llegada", "espera_min"]],
+    if len(queue) > 5:
+        with st.expander(f"Ver los otros {len(queue) - 5}"):
+            st.dataframe(queue.iloc[5:][["codigo", "nivel_triage", "area", "llegada", "espera_min"]],
                          hide_index=True, width="stretch")
-    st.caption("Códigos URG-xxxx no reversibles: la cola no muestra nombres ni documentos.")
-
-
-def _saturation(ref) -> None:
-    st.markdown("#### Saturación por servicio")
-    beds = _beds(ref.isoformat())
-    phys = beds[(beds["es_virtual"] == 0) & (beds["servicio"] != "Urgencias")]
-    by = (phys.groupby("servicio").agg(cap=("ocupada", "size"), occ=("ocupada", "sum")).reset_index())
-    by["pct"] = by["occ"] / by["cap"] * 100
-    by = by.sort_values("pct")
-    fig = go.Figure(go.Bar(
-        x=by["pct"], y=by["servicio"], orientation="h", marker_color=[occupancy_color(p) for p in by["pct"]],
-        text=[f"{o}/{c}" for o, c in zip(by["occ"], by["cap"])], textposition="outside",
-        textfont=dict(size=11, color=MUTED), cliponaxis=False,
-        hovertemplate="%{y}: %{x:.1f} %<extra></extra>"))
-    fig.add_vline(x=config.OCCUPANCY_WARNING_PCT, line_dash="dot", line_color=AMBER, line_width=1.5)
-    fig.update_xaxes(range=[0, 115], title="% de camas físicas ocupadas")
-    fig = style_fig(fig, 330)
-    fig.update_layout(margin=dict(l=10, r=40, t=10, b=10))
-    show(fig, key="hoy_saturation")
-    st.caption(f"Línea punteada: umbral de alerta ({fmt_num(config.OCCUPANCY_WARNING_PCT)} %). "
-               "Censo del día de corte, sin camas virtuales de expansión.")
-
-
-def _todo_html(n, title: str, sub: str) -> str:
-    return (f'<div class="todo"><div class="todo-n">{esc(n)}</div><div class="todo-t">{esc(title)}</div>'
-            f'<div class="todo-s">{esc(sub)}</div></div>')
-
-
-def _role_todo(role: str, queue, occ: dict, per_row: int = 2) -> None:
-    """Pendientes del rol: (cifra, título, detalle, sección destino, texto del enlace)."""
-    clin, now = ctx.get_clin(), ctx.clock()
-    if role == "ADMIN":
-        red = sum(1 for _ in ps.stock_semaphore(clin, only=("ROJO",)))
-        units = ctx.cached("kpi_bed_occupancy", ctx.ref_date(), by="subgrupo_cama")
-        hot = int((units.query("servicio != 'Urgencias'")["porcentaje_ocupacion"]
-                   >= config.OCCUPANCY_WARNING_PCT).sum())
-        breaks = clin.execute("SELECT COUNT(*) FROM auditoria_accesos WHERE acceso_emergencia = 1").fetchone()[0]
-        items = [(red, "Ítems en rojo", "semáforo de farmacia (incluye reservas)", "alertas", "Orden de compra →"),
-                 (hot, "Unidades sobre el umbral", f"≥ {fmt_num(config.OCCUPANCY_WARNING_PCT)} % de ocupación",
-                  "camas", "Mapa de camas →"),
-                 (breaks, "Accesos de emergencia", "“romper el vidrio” registrados", "datos", "Bitácora →"),
-                 (occ["expansion_en_uso"], "Pacientes en expansión", f"de {occ['expansion_total']} camas virtuales",
-                  "camas", "Ver unidades →")]
-    elif role == "DOCTOR":
-        reeval = clin.execute("SELECT COUNT(*) FROM citas WHERE motivo = 'REEVALUACION_FORMULA' "
-                              "AND estado = 'PROGRAMADA'").fetchone()[0]
-        active = sum(p["formulas_activas"] for p in ps.clinical_patients(clin))
-        urgent = int((queue["nivel_triage"] <= 2).sum()) if not queue.empty else 0
-        items = [(reeval, "Citas de reevaluación", "fórmulas caducadas por revisar", "clinico", "Atender →"),
-                 (active, "Fórmulas activas", "pacientes con historia abierta", "clinico", "Historias →"),
-                 (urgent, "Triage I–II esperando", "atención prioritaria en urgencias", None, ""),
-                 (occ["libres"], "Camas físicas libres", "para decidir hospitalizaciones", "camas", "Ubicar cama →")]
-    else:  # ENFERMERIA
-        q = ps.dispensing_queue(clin)
-        soon = sum(1 for r in q if r["ambito"] == "AMBULATORIA"
-                   and datetime.strptime(r["fecha_limite_reclamo"], FMT) - datetime.strptime(now, FMT)
-                   < timedelta(hours=24))
-        hosp = sum(1 for r in q if r["ambito"] == "HOSPITALARIA")
-        items = [(len(q), "Fórmulas por entregar", "cola de dispensación", "clinico", "Dispensar →"),
-                 (soon, "Vencen en menos de 24 h", "si no se reclaman vuelven a stock", "clinico", "Priorizar →"),
-                 (hosp, "Órdenes hospitalarias", "dosis a administrar en piso", "clinico", "Ver órdenes →"),
-                 (occ["libres"], "Camas físicas libres", "para recibir traslados", "camas", "Ubicar cama →")]
-    st.markdown("#### Mis pendientes")
-    for start in range(0, len(items), per_row):
-        cols = st.columns(per_row)
-        for col, (n, title, sub, slug, label) in zip(cols, items[start:start + per_row]):
-            with col:
-                st.markdown(_todo_html(n, title, sub), unsafe_allow_html=True)
-                if slug:
-                    _link(slug, label)
 
 
 # ---------------------------------------------------------------------------

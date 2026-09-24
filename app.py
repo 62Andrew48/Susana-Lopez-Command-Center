@@ -4,7 +4,8 @@ app.py — Punto de entrada de la interfaz (Streamlit ≥ 1.46).
     streamlit run app.py
 
 Estructura:
-  * Cabecera contextual persistente: usuario (selector de demo), rol, turno, acceso de emergencia y reloj.
+  * Cabecera contextual persistente: usuario (selector de demo), campana de notificaciones por rol, turno,
+    acceso de emergencia y reloj.
   * Menú lateral agrupado (Operación · Clínico · Gestión) filtrado por permisos (RBAC de clinico.db).
     La página de inicio es "Hoy". st.navigation ejecuta SOLO la página activa.
   * Subsecciones dentro de cada página con st.tabs / st.expander.
@@ -24,6 +25,7 @@ import config
 import demo_seed as ds
 from ui import chat_bubble as cb
 from ui import context as ctx
+from ui import notifications as nt
 from ui import pages_analytics as pa
 from ui import pages_camas as pm
 from ui import pages_clinical as pc
@@ -46,9 +48,9 @@ def _clock_label() -> str:
 # ---------------------------------------------------------------------------
 # Cabecera contextual persistente
 # ---------------------------------------------------------------------------
-brand, who, clock_col = st.columns([2.2, 1.6, 0.9], vertical_alignment="center")
+brand, who, bell_col, clock_col = st.columns([2.2, 1.6, 0.5, 0.9], vertical_alignment="center")
 brand.markdown('<div class="brand"><h1>Hospital Susana López de Valencia</h1>'
-               '<p>Centro de mando operativo · Agente IA · Módulo clínico</p></div>', unsafe_allow_html=True)
+               '<p>Centro de mando</p></div>', unsafe_allow_html=True)
 selected = who.selectbox("Usuario (demo)", list(ctx.DEMO_SELECTOR), format_func=ctx.DEMO_SELECTOR.get,
                          index=list(ctx.DEMO_SELECTOR).index(ctx.user_id()),
                          help="Selector simulado para la demostración. En producción: login con JWT.")
@@ -56,7 +58,8 @@ if selected != ctx.user_id():
     st.session_state.user_id = selected
     st.rerun()
 
-with clock_col.popover("🕒 Reloj de demo", width="stretch"):
+with clock_col.popover(f"🕒 {datetime.strptime(ctx.clock(), '%Y-%m-%d %H:%M:%S'):%H:%M}", width="stretch",
+                       help="Reloj de la demostración: cambia la hora para simular turnos"):
     st.caption(f"Reloj clínico: **{_clock_label()}**")
     if st.button("☀️ Turno de día (10:00)", width="stretch"):
         ds.set_clock_hour(clin, 10)
@@ -80,8 +83,6 @@ if user["rol"] in ("DOCTOR", "ENFERMERIA"):
     active = [k for k in st.session_state.get("emergency", {}) if k[0] == user["id"]]
     if active:
         chips.append(chip(f"Acceso de emergencia activo ({len(active)})", "danger", "🚨"))
-chips.append(chip(f"Reloj clínico {_clock_label()}", "neutral", "🕒"))
-chips.append(chip(f"Corte analítico {ctx.ref_date():%d/%m/%Y}", "neutral", "📊"))
 st.markdown(f'<div class="ctx-chips">{"".join(chips)}</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
@@ -115,5 +116,6 @@ if not sections:
 flat = [page for group in sections.values() for page in group]
 menu = flat if ctx.current_user()["rol"] == "PACIENTE" else sections
 page = st.navigation(menu, position="sidebar")
+nt.render_bell(bell_col)  # la campana se dibuja cuando ya existen los enlaces a las páginas del rol
 page.run()
 cb.render(page.url_path)  # asistente IA flotante (abajo a la derecha), según permisos
