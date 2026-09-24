@@ -22,6 +22,7 @@ import database as db
 import forecast_text as ft
 import ml_services as ml
 import pharmacy_service as ps
+import month_report as mr
 import reports
 from ui import context as ctx
 from ui.theme import chip, esc, icon, page_header, section_title
@@ -287,7 +288,8 @@ def report_data() -> dict:
         recs.append("El pronóstico de urgencias no estuvo disponible al generar el informe.")
 
     admin = ft.admin_summary([(s.name, readings[s.code]) for s in ml.SERVICES])
-    return {"cutoff": ref.isoformat(), "generated_by": ctx.current_user()["nombre_mostrado"],
+    mtd = mr.month_to_date(conn, ref)
+    return {"cutoff": ref.isoformat(), "generated_by": ctx.current_user()["nombre_mostrado"], "mtd": mtd,
             "admin": admin.__dict__,
             "situation": situation, "summary": " ".join(parts), "recommendations": recs,
             "forecasts": forecasts, "purchases": urgent, "shifts": shifts}

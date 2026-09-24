@@ -318,6 +318,7 @@ def _render_chart(df: pd.DataFrame, spec: dict | None, key: str) -> None:
 
 def _render_response(resp: AgentResponse, idx: int) -> None:
     st.markdown(resp.answer)
+    chat.downloads(resp, f"dl_{ctx.user_id()}_{idx}")
     for rec in resp.recommendations[:3]:
         st.markdown(f'{severity_pill(rec.severity)} <b>{esc(rec.title)}</b> — {esc(rec.action)}',
                     unsafe_allow_html=True)

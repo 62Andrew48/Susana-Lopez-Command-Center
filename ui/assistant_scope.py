@@ -95,31 +95,88 @@ _WANT_APPT = re.compile(r"(quiero|necesito|pedir|pido|solicit|agend|sacar|separa
                         r"me siento mal|sintoma|me enferme|brote|alergia)")
 
 
-def _request_appointment(question: str, clin: sqlite3.Connection, id_paciente: int, now: str) -> AgentResponse:
-    """El paciente pide una cita por chat: se crea la solicitud y le llega a facturación."""
+NO_ADVICE = ("No soy un profesional de la salud, así que no puedo recetarte, recomendarte medicamentos ni decirte qué "
+             "tienes. Eso lo decide un médico que revise tu historia clínica, tus alergias y los medicamentos que ya "
+             "tomas. Mientras tanto, evita automedicarte.")
+_ADVICE = re.compile(r"recomiend|recet|que (me )?(puedo )?tom(o|ar)\b|puedo tomar|que (medicamento|remedio|pastilla|droga)s?"
+                     r"\b(?! tengo)|pastillas? para|remedio para|jarabe para|dosis|diagnost|que tengo\b|sera (grave|normal)|"
+                     r"es grave|es normal que|debo preocup|antibiotic|automedic|me (puedo|debo) (tomar|aplicar|inyectar|"
+                     r"poner)|sirve para|mezclar|combinar|dejar de tomar|suspend|que significa (mi|el|este) (resultado|examen)|"
+                     r"mis examenes (salieron|dicen)|me (hace|hara) dano|cura para|como (se )?cura|tratamiento para")
+_DOSE = re.compile(r"cada cuant|como (me )?(lo |la )?tomo|cuant[oa]s? (me )?tomo|a que hora (me )?(lo |la )?tomo|"
+                   r"(dosis|indicaciones) de (mi|la|el)")
+_OWN_RX = re.compile(r"tengo por reclamar|por reclamar|pendientes?|mis (formulas|medicamentos)|mi formula|reclam")
+
+
+def _forward_or_request(question: str, clin, id_paciente: int, now: str, tipo: str, pref: str) -> str:
+    """Si hay una solicitud abierta, el mensaje llega a esa conversación con facturación; si no, se crea una."""
     import requests_service as rq
-    q = _norm(question)
-    tipo = "CONTROL" if "control" in q else "RESULTADOS" if "resultado" in q else \
+    pending = clin.execute("SELECT id FROM solicitudes_cita WHERE id_paciente = ? AND estado = 'PENDIENTE'",
+                           (id_paciente,)).fetchone()
+    if pending:
+        rq.send_message(clin, pending[0], lado="PACIENTE", autor_id=None, texto=question, now=now,
+                        id_paciente=id_paciente)
+        return ("Ya tienes una solicitud de cita abierta: le pasé este mensaje a facturación para que lo tengan en "
+                "cuenta al asignarte el profesional. Sigue la conversación en “Mis fórmulas y citas” → Mis citas.")
+    phone = clin.execute("SELECT telefono FROM pacientes_clinicos WHERE id_paciente = ?", (id_paciente,)).fetchone()
+    rq.create_request(clin, id_paciente=id_paciente, tipo=tipo, sintomas=question, preferencia=pref,
+                      telefono=phone[0] if phone else None, canal="ASISTENTE", now=now)
+    return (f"Le envié tu solicitud a facturación ({rq.TYPES[tipo].lower()}, {rq.PREFERENCES[pref].lower()}) con lo "
+            "que me contaste. Te asignan el profesional adecuado y te escriben por WhatsApp o lo ves en “Mis fórmulas "
+            "y citas” → Mis citas.")
+
+
+def _kind(q: str) -> tuple[str, str]:
+    tipo = "CONTROL" if "control" in q else "RESULTADOS" if "resultado" in q or "examen" in q else \
         "ESPECIALISTA" if "especialista" in q else "MEDICINA_GENERAL"
     pref = "MANANA" if "manana" in q else "TARDE" if "tarde" in q else "CUALQUIERA"
-    urgent = rq.is_emergency(question)
-    lead = f"**{rq.EMERGENCY_TEXT}**\n\n" if urgent else ""
-    phone = clin.execute("SELECT telefono FROM pacientes_clinicos WHERE id_paciente = ?", (id_paciente,)).fetchone()
+    return tipo, pref
+
+
+def _request_appointment(question: str, clin: sqlite3.Connection, id_paciente: int, now: str,
+                         advice: bool = False) -> AgentResponse:
+    """El paciente pide una cita (o un consejo médico que el bot no puede dar): la solicitud llega a facturación."""
+    import requests_service as rq
+    q = _norm(question)
+    lead = f"**{rq.EMERGENCY_TEXT}**\n\n" if rq.is_emergency(question) else ""
+    if advice:
+        lead += NO_ADVICE + "\n\n"
+    tipo, pref = _kind(q)
     try:
-        rq.create_request(clin, id_paciente=id_paciente, tipo=tipo, sintomas=question, preferencia=pref,
-                          telefono=phone[0] if phone else None, canal="ASISTENTE", now=now)
+        text = _forward_or_request(question, clin, id_paciente, now, tipo, pref)
     except sqlite3.IntegrityError as exc:
-        return AgentResponse(question, lead + f"{exc}. Puedes verla en “Mis fórmulas y citas” → Mis citas.",
-                             engine="mis datos")
-    return AgentResponse(question, lead + f"Listo, le envié tu solicitud a facturación ({rq.TYPES[tipo].lower()}, "
-                                          f"{rq.PREFERENCES[pref].lower()}) con lo que me contaste. Te escribirán por "
-                                          "WhatsApp o verás la cita en “Mis fórmulas y citas” → Mis citas.",
-                         engine="mis datos")
+        text = f"{exc}. Puedes escribirle a facturación en “Mis fórmulas y citas” → Mis citas."
+    return AgentResponse(question, lead + text, engine="orientación" if advice else "mis datos")
+
+
+def _own_dose(question: str, clin: sqlite3.Connection, id_paciente: int) -> AgentResponse | None:
+    """«¿Cada cuánto me tomo la claritromicina?»: se responde SOLO con lo que el médico dejó en SU fórmula."""
+    q = _norm(question)
+    rows = clin.execute("""
+        SELECT f.nombre AS producto, p.dosis, p.frecuencia_horas, p.duracion_dias, u.nombre_mostrado AS medico
+          FROM prescripciones p JOIN productos_farmacia f ON f.codigo = p.codigo_producto
+          LEFT JOIN usuarios u ON u.id = p.medico_id
+         WHERE p.id_paciente = ? AND p.estado IN ('VIGENTE','PARCIAL','PENDIENTE_STOCK')""", (id_paciente,)).fetchall()
+    for r in rows:
+        name = _norm(str(r["producto"]).split()[0])
+        if len(name) >= 4 and name in q:
+            return AgentResponse(question, f"Según la fórmula que te dejó {r['medico'] or 'tu médico'}: "
+                                           f"**{str(r['producto']).capitalize()}**, {r['dosis']} cada "
+                                           f"{r['frecuencia_horas']} horas durante {r['duracion_dias']} días. No "
+                                           "cambies la dosis por tu cuenta; si tienes dudas o te cae mal, pide una "
+                                           "cita y te lo revisan.", engine="mis datos")
+    return None
 
 
 def _patient_answer(question: str, clin: sqlite3.Connection, id_paciente: int, now: str) -> AgentResponse | None:
     q = _norm(question)
     t = datetime.strptime(now, FMT)
+    if _DOSE.search(q):
+        own = _own_dose(question, clin, id_paciente)
+        if own is not None:
+            return own
+    if (_ADVICE.search(q) or _DOSE.search(q)) and not _OWN_RX.search(q):
+        return _request_appointment(question, clin, id_paciente, now, advice=True)
     if _WANT_APPT.search(q) and not re.search(r"cuando|a que hora|tengo (alguna |una )?cita|mis citas|proxima", q):
         return _request_appointment(question, clin, id_paciente, now)
     if _RX.search(q):
@@ -177,6 +234,25 @@ def _forecast(question: str, agent) -> AgentResponse | None:
         return resp
 
 
+_MONTH = re.compile(r"\b(reporte|informe|resumen|balance)\b.{0,30}\b(mes|mensual)\b|\bmensual\b|en lo que va (del|de este) "
+                    r"mes|lo que (va|llevamos) (del|de este) mes|acumulado del mes|como (vamos|va el hospital|va el mes)|"
+                    r"(cuantos|cuantas) (pacientes|personas) (se han atendido|hemos atendido|se atendieron|han venido|"
+                    r"van|llevamos)")
+
+
+def _month_report(question: str, agent) -> AgentResponse:
+    """Reporte desde el día 1 del mes hasta la fecha de corte, con el Excel para descargar."""
+    import month_report as mr
+    import reports
+    mtd = mr.month_to_date(agent.conn, agent.ref)
+    resp = AgentResponse(question, f"{mtd['titular']}\n\n{mtd['detalle']}\n\nAbajo el detalle frente a los mismos "
+                                   f"días de {mtd['mes_anterior']}. El reporte arranca de nuevo el día 1 de cada mes.",
+                         data=mr.table(mtd), engine="reporte del mes")
+    resp.files = [(f"reporte_{mtd['mes']}_al_{mtd['fin']}.xlsx", reports.month_to_date_xlsx(mtd),
+                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")]
+    return resp
+
+
 def answer(question: str, scope: Scope, *, agent=None, bed_answer=None, clin=None, id_paciente=None,
            now: str | None = None, forecasts: bool = False) -> AgentResponse:
     """Responde dentro del alcance del rol. `bed_answer` ubica camas libres; `forecasts` habilita los
@@ -197,6 +273,9 @@ def answer(question: str, scope: Scope, *, agent=None, bed_answer=None, clin=Non
 
     if scope.code == "operativo" and (RAW_SQL.match(question) or DESTRUCTIVE_REQUEST.search(normalize(question))):
         return AgentResponse(question, "Consulta bloqueada: el asistente es de solo lectura.", engine="seguridad")
+
+    if scope.code == "completo" and agent is not None and _MONTH.search(normalize(question)):
+        return _month_report(question, agent)
 
     beds = bed_answer(question) if bed_answer else None
     if beds is not None:

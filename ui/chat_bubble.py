@@ -143,7 +143,8 @@ def ask(question: str) -> AgentResponse:
 ENGINE_SHORT = {"llm": "IA", "reglas": "Respuesta verificada", "reglas (respaldo)": "Respuesta verificada",
                 "seguridad": "Bloqueado", "sql directo": "Consulta validada", "mapa de camas": "Mapa de camas",
                 "glosario": "Glosario", "mis datos": "Solo tus datos", "fuera de alcance": "Acceso limitado",
-                "modelo predictivo": "Modelo predictivo", "archivo": "Análisis del archivo"}
+                "modelo predictivo": "Modelo predictivo", "archivo": "Análisis del archivo",
+                "reporte del mes": "Datos del HIS · mes en curso", "orientación": "No da consejo médico"}
 
 
 def prompt_text(value) -> str | None:
@@ -198,6 +199,12 @@ def speak(resp: AgentResponse, key: str) -> None:
     components.html(voice.speak_widget(resp.answer, key), height=42)
 
 
+def downloads(resp: AgentResponse, key: str) -> None:
+    """Archivos que acompañan la respuesta (p. ej. el reporte del mes en Excel)."""
+    for i, (name, data, mime) in enumerate(getattr(resp, "files", None) or []):
+        st.download_button(f"Descargar {name}", data, name, mime, key=f"{key}_{i}", icon=":material/download:")
+
+
 def _render(resp: AgentResponse, idx: int) -> None:
     st.markdown(resp.answer)
     if resp.engine == "mapa de camas" and resp.data is not None:
@@ -211,6 +218,7 @@ def _render(resp: AgentResponse, idx: int) -> None:
                 and "severity" not in resp.data.columns:
             st.dataframe(resp.data.head(8), hide_index=True, width="stretch",
                          height=min(36 * min(len(resp.data), 8) + 40, 260), key=f"ia_df_{ctx.user_id()}_{idx}")
+    downloads(resp, f"ia_dl_{ctx.user_id()}_{idx}")
     meta = f"{ENGINE_SHORT.get(resp.engine, resp.engine)} · {resp.elapsed_ms} ms"
     if resp.sql and _scope().can_see_sql:
         with st.expander(meta + " · ver SQL"):

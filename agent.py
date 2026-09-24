@@ -122,6 +122,7 @@ class AgentResponse:
     recommendations: list[Alert] = field(default_factory=list)
     error: str | None = None
     elapsed_ms: int = 0
+    files: list = field(default_factory=list)   # [(nombre, bytes, mime)] descargas que acompañan la respuesta
 
     def to_dict(self) -> dict:
         return {

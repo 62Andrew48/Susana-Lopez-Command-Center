@@ -102,6 +102,15 @@ pediatría) y abre WhatsApp con el mensaje ya armado (enlace `wa.me`, sin costo 
 urgencia (dolor en el pecho, falta de aire…), se le indica ir a urgencias o llamar al 123. Con `HOSPITAL_WHATSAPP` en
 `.env` el portal muestra además el botón para escribirle a facturación.
 
+**El asistente no da consejo médico**: si el paciente pide que le receten, le recomienden un medicamento, le
+digan qué tiene o si algo es grave, el asistente responde que no es un profesional de la salud y que eso lo decide
+un médico que conozca su historia clínica y sus alergias; su mensaje se envía a facturación (o a la conversación de
+su solicitud abierta) para que le asignen la cita. Solo responde la dosis si está en SU fórmula vigente.
+
+**Reporte del mes en curso** (`month_report.py`): desde el día 1 del mes hasta la fecha de corte ("del 1 al 21 de
+septiembre se han atendido 2.391 personas"), comparado con los mismos días del mes anterior. Lo genera el asistente
+("genera el reporte del mes", con Excel para descargar) y va dentro del informe gerencial en PDF y Excel.
+
 **Personas que no están registradas**: desde el inicio de sesión dejan sus datos; gerencia las cita (día, hora y lugar)
 para ir con su documento, con WhatsApp y correo si hay SMTP; la persona consulta la respuesta con documento + correo.
 

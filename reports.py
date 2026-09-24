@@ -180,6 +180,14 @@ def executive_report_xlsx(data: dict) -> bytes:
         row = _paragraph(ws, row - 1, ADMIN_NOTE, span, height=28) + 1
     row = _section(ws, row, "Resumen", span)
     row = _paragraph(ws, row, data.get("summary", ""), span, height=80) + 1
+    mtd = data.get("mtd")
+    if mtd:
+        row = _section(ws, row, f"Lo que va del mes: 1 al {mtd['dias']} de {mtd['mes']}", span)
+        row = _paragraph(ws, row, f"{mtd['titular']} {mtd['detalle']}", span, height=58)
+        row = _table(ws, row, ["Indicador", f"1 al {mtd['dias']} de {mtd['mes']}",
+                               f"Mismos días de {mtd['mes_anterior']} · cambio"],
+                     [[r["indicador"], r["este_mes"], f"{r['mes_anterior']} · {r['variacion']}"] for r in mtd["filas"]],
+                     [30, 22, 64]) + 1
     row = _section(ws, row, "Situación actual", span)
     sit = data.get("situation") or []
     row = _table(ws, row, ["Indicador", "Valor", "Qué significa"], [[a, b, c] for a, b, c, _ in sit],
@@ -303,6 +311,13 @@ def executive_report_pdf(data: dict) -> bytes:
                                  ("BOTTOMPADDING", (0, 0), (-1, -1), 5), ("LEFTPADDING", (0, 0), (-1, -1), 8)]))
         story += [box, Spacer(1, 6)]
     story += [p("Resumen", h2), p(data.get("summary", ""), lead)]
+    mtd = data.get("mtd")
+    if mtd:
+        story += [p(f"Lo que va del mes: 1 al {mtd['dias']} de {mtd['mes']}", h2), p(mtd["titular"], lead),
+                  p(mtd["detalle"], base), Spacer(1, 4),
+                  table(["Indicador", f"1 al {mtd['dias']} de {mtd['mes']}", f"Mismos días de {mtd['mes_anterior']}",
+                         "Cambio"], [[r["indicador"], r["este_mes"], r["mes_anterior"], r["variacion"]]
+                                     for r in mtd["filas"]], [7.3 * cm, 3.4 * cm, 3.8 * cm, 3.0 * cm])]
 
     sit = data.get("situation") or []
     story += [p("Situación actual", h2),
@@ -373,3 +388,25 @@ def executive_report_pdf(data: dict) -> bytes:
                       bottomMargin=2 * cm, title="Informe gerencial HSLV", author=HOSPITAL).build(
         story, onFirstPage=footer, onLaterPages=footer)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Reporte "lo que va del mes" (lo descarga el asistente)
+# ---------------------------------------------------------------------------
+def month_to_date_xlsx(mtd: dict, generated_by: str = "") -> bytes:
+    """Excel del acumulado desde el día 1 del mes hasta la fecha de corte, frente a los mismos días del mes anterior."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Lo que va del mes"
+    row = _header(ws, f"Reporte del mes en curso: 1 al {mtd['dias']} de {mtd['mes']}",
+                  f"Datos hasta el {mtd['fin']} · comparado con el {mtd['inicio_anterior']} al {mtd['fin_anterior']}"
+                  + (f" · generado por {generated_by}" if generated_by else ""), 5)
+    row = _paragraph(ws, row, mtd["titular"], 5, height=34)
+    row = _paragraph(ws, row, mtd["detalle"], 5, height=34) + 1
+    rows = [[r["indicador"], r["valor"], r["anterior"], r["variacion"], r["lectura"]] for r in mtd["filas"]]
+    _table(ws, row, ["Indicador", f"1 al {mtd['dias']} de {mtd['mes']}", f"Mismos días de {mtd['mes_anterior']}",
+                     "Cambio", "Lectura"], rows, [44, 18, 22, 16, 28], number_cols={2: "#,##0.0", 3: "#,##0.0"})
+    _paragraph(ws, row + len(rows) + 2, "Fuente: extracto del HIS del reto. Solo conteos agregados, sin datos de "
+               "pacientes. La proyección al cierre es una regla de tres con el ritmo diario, no un pronóstico.", 5,
+               height=30)
+    return _bytes(wb)

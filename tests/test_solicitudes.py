@@ -109,7 +109,7 @@ def test_el_bot_crea_la_solicitud_del_paciente(clin):
     row = clin.execute("SELECT * FROM solicitudes_cita WHERE id_paciente = ? AND estado = 'PENDIENTE'", (rosa,)).fetchone()
     assert row["canal"] == "ASISTENTE" and row["preferencia"] == "TARDE" and row["telefono"] == "3002223344"
     again = scope.answer("necesito una cita con el medico", pat, clin=clin, id_paciente=rosa, now=NOW)
-    assert "pendiente" in again.answer
+    assert "le pasé este mensaje a facturación" in again.answer
     urgent = scope.answer("me duele mucho, tengo dolor en el pecho", pat, clin=clin, id_paciente=_pid(clin, "10542001"),
                           now=NOW)
     assert "123" in urgent.answer
@@ -254,3 +254,59 @@ def test_conversacion_paciente_facturacion(clin):
     rq.cancel_request(clin, sol["id"], 110, NOW)
     with pytest.raises(sqlite3.IntegrityError, match="retirada"):
         rq.send_message(clin, sol["id"], lado="PACIENTE", autor_id=4, texto="hola", now=NOW, id_paciente=110)
+
+
+# --- El asistente del paciente no da consejo médico ------------------------------------------------
+def test_bot_no_receta_y_pasa_el_mensaje_a_facturacion(clin):
+    pat = scope.SCOPES["paciente"]
+    rosa = _pid(clin, "25270444")
+    r = scope.answer("me duele la cabeza que medicamento me recomiendas", pat, clin=clin, id_paciente=rosa, now=NOW)
+    assert r.answer.startswith("No soy un profesional de la salud") and "alergias" in r.answer
+    assert r.engine == "orientación"
+    row = clin.execute("SELECT * FROM solicitudes_cita WHERE id_paciente = ? AND estado = 'PENDIENTE'", (rosa,)).fetchone()
+    assert row["canal"] == "ASISTENTE"
+    # con la solicitud ya abierta, el siguiente mensaje llega a la conversación con facturación
+    r2 = scope.answer("¿puedo tomar ibuprofeno?", pat, clin=clin, id_paciente=rosa, now=NOW)
+    assert "le pasé este mensaje a facturación" in r2.answer
+    assert [m["texto"] for m in rq.messages(clin, row["id"])] == ["¿puedo tomar ibuprofeno?"]
+    for q in ("¿es grave tener fiebre de 39?", "que significa mi resultado de glicemia", "tengo diarrea, que pastilla me sirve"):
+        assert scope.answer(q, pat, clin=clin, id_paciente=rosa, now=NOW).answer.startswith("No soy un profesional")
+    own = scope.answer("¿Qué medicamentos tengo por reclamar?", pat, clin=clin, id_paciente=rosa, now=NOW)
+    assert "No soy un profesional" not in own.answer
+
+
+def test_bot_responde_la_dosis_solo_desde_la_formula_del_paciente(clin):
+    pat = scope.SCOPES["paciente"]
+    laura = _pid(clin, "1061700001")
+    r = scope.answer("¿cada cuánto me tomo la claritromicina?", pat, clin=clin, id_paciente=laura, now=NOW)
+    assert "Según la fórmula" in r.answer and "cada 12 horas" in r.answer
+    other = scope.answer("¿cada cuánto me tomo el tramadol?", pat, clin=clin, id_paciente=laura, now=NOW)
+    assert other.answer.startswith("No soy un profesional")
+
+
+# --- Reporte del mes en curso --------------------------------------------------------------------
+def test_reporte_desde_el_dia_1_del_mes():
+    import month_report as mr
+    import reports
+    conn = ps_conn()
+    assert mr.period(date(2026, 3, 31))[2:] == (date(2026, 2, 1), date(2026, 2, 28))
+    mtd = mr.month_to_date(conn, date(2026, 9, 21))
+    assert mtd["inicio"] == "2026-09-01" and mtd["dias"] == 21
+    assert mtd["titular"].startswith("Del 1 al 21 de septiembre (21 días) se han atendido")
+    personas = next(r for r in mtd["filas"] if r["clave"] == "personas")
+    real = conn.execute("SELECT COUNT(DISTINCT id_paciente) FROM ingresos WHERE fecha_ingreso BETWEEN "
+                        "'2026-09-01 00:00:00' AND '2026-09-21 23:59:59'").fetchone()[0]
+    assert personas["valor"] == real
+    assert "puntos" in next(r for r in mtd["filas"] if r["clave"] == "ocupacion")["variacion"]
+    assert reports.month_to_date_xlsx(mtd)[:2] == b"PK"
+
+
+def test_el_asistente_genera_el_reporte_del_mes():
+    from agent import HospitalAgent
+    agent = HospitalAgent(provider="none", mode="rules")
+    full = scope.SCOPES["completo"]
+    r = scope.answer("genera el reporte del mes", full, agent=agent)
+    assert r.engine == "reporte del mes" and "se han atendido" in r.answer and r.files
+    assert r.files[0][0].endswith(".xlsx") and r.data is not None
+    k = scope.answer("¿Qué servicio tiene más pacientes ingresados este mes?", full, agent=agent)
+    assert k.engine != "reporte del mes"
