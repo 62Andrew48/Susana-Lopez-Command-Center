@@ -1,11 +1,60 @@
-# Credenciales
+# =============================================================================
+# .gitignore · HSLV · Hackatón FUP 2026
+# =============================================================================
+
+# --- Credenciales (NUNCA al repositorio) -------------------------------------
 .env
-# Base generada (se reconstruye con database.py)
-hospital.db
-clinico.db*
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pem
+*.key
+
+# --- Datos del hospital -------------------------------------------------------
+# Extractos del HIS: pertenecen al hospital y pesan ~190 MB
+Datos/*
+!Datos/LEEME.md
+# Documentos del reto y capturas (subir solo con autorización)
+*.pdf
+*.docx
+*.xlsx
+
+# --- Bases de datos generadas (se reconstruyen solas) ------------------------
+# hospital.db pesa ~320 MB: GitHub rechaza archivos de más de 100 MB
+*.db
 *.db-journal
-# Datos del hospital: NO se publican en el repositorio
-Datos/*.txt
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Exportaciones y paquetes -------------------------------------------------
+*.zip
+*.csv
+orden_compra*.csv
+
+# --- Python -------------------------------------------------------------------
 __pycache__/
+*.py[cod]
+*.egg-info/
 .pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- Entornos virtuales -------------------------------------------------------
 .venv/
+venv/
+env/
+
+# --- Editores y sistema operativo ---------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Registros -----------------------------------------------------------------
+*.log
