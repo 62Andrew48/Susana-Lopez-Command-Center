@@ -235,3 +235,14 @@ def test_patient_scope_never_touches_hospital_data(clin):
     assert answer("¿Cuántas camas de UCI están ocupadas hoy?", sc, **kw).engine == "fuera de alcance"
     assert answer("SELECT * FROM pacientes", sc, **kw).engine == "fuera de alcance"
     assert answer("¿Qué es una EPS?", sc, **kw).engine == "glosario"
+
+
+def test_physical_trend_matches_bed_map(conn):
+    """La serie de Indicadores y la foto de Hoy/Camas usan la misma regla."""
+    trend = db.physical_occupancy_trend(conn, date(2026, 9, 14), REF)
+    beds = db.bed_map(conn, REF)
+    phys = beds[(beds["es_virtual"] == 0) & (beds["servicio"] != "Urgencias")]
+    last = trend[trend["fecha"] == REF.isoformat()]
+    assert last["camas_ocupadas"].sum() == phys["ocupada"].sum()
+    assert last["capacidad"].sum() == len(phys)
+    assert trend["fecha"].nunique() == 8

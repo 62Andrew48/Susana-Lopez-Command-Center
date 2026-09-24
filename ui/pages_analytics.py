@@ -84,7 +84,10 @@ def page_tablero() -> None:
 
     # --- 1.2 y 1.3 en sub-pestañas ---
     if beds:
-        tab_beds, tab_er = st.tabs(["🛏️ Capacidad y camas", "⏱️ Urgencias y tiempos de espera"])
+        tab_trend, tab_beds, tab_er = st.tabs(["📈 Tendencias", "🛏️ Capacidad y camas",
+                                               "⏱️ Urgencias y tiempos de espera"])
+        with tab_trend:
+            _trends_section(start, end)
         with tab_beds:
             _beds_section(end)
         with tab_er:
@@ -137,6 +140,48 @@ def _beds_section(end) -> None:
     st.markdown('<div class="chart-note">Censo del día de corte. El HIS registra la última cama de cada episodio: '
                 'la foto del día es confiable; la serie histórica subestima unidades de paso.</div>',
                 unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _physical_trend(start_iso: str, end_iso: str) -> pd.DataFrame:
+    from datetime import date
+    return db.physical_occupancy_trend(ctx.get_conn(), date.fromisoformat(start_iso), date.fromisoformat(end_iso))
+
+
+def _trends_section(start, end) -> None:
+    """Las dos gráficas que pide el reto: evolución de la ocupación (línea) y distribución por servicio (pastel)."""
+    left, right = st.columns([1.5, 1], gap="medium")
+    with left:
+        span_start = min(start, end - timedelta(days=13))  # al menos dos semanas para ver la tendencia
+        trend = _physical_trend(span_start.isoformat(), end.isoformat())
+        by_service = st.toggle("Ver por servicio", key="trend_by_service")
+        if by_service:
+            fig = px.line(trend, x="fecha", y="porcentaje_ocupacion", color="servicio",
+                          color_discrete_sequence=ACTIVITY_SEQ,
+                          labels={"porcentaje_ocupacion": "% ocupación", "fecha": "", "servicio": ""})
+        else:
+            total = trend.groupby("fecha", as_index=False)[["camas_ocupadas", "capacidad"]].sum()
+            total["porcentaje_ocupacion"] = (total["camas_ocupadas"] / total["capacidad"] * 100).round(1)
+            fig = go.Figure(go.Scatter(x=total["fecha"], y=total["porcentaje_ocupacion"], mode="lines+markers",
+                                       line=dict(color=BLUE, width=3),
+                                       customdata=total[["camas_ocupadas", "capacidad"]],
+                                       hovertemplate="%{x}: %{y:.1f} % (%{customdata[0]}/%{customdata[1]})"
+                                                     "<extra></extra>"))
+            fig.update_yaxes(title="% ocupación")
+        fig.add_hline(y=config.OCCUPANCY_WARNING_PCT, line_dash="dot", line_color=AMBER, line_width=1.5)
+        fig.update_yaxes(range=[0, 105])
+        show(style_fig(fig, 360, "Evolución de la ocupación de camas físicas"))
+    with right:
+        adm = ctx.cached("kpi_admissions_by_service", start, end)
+        pie = adm.groupby("servicio", as_index=False)["pacientes"].sum().sort_values("pacientes", ascending=False)
+        if len(pie) > 6:
+            top, rest = pie.head(5), pie.iloc[5:]
+            pie = pd.concat([top, pd.DataFrame({"servicio": ["Otros"], "pacientes": [rest["pacientes"].sum()]})])
+        fig = px.pie(pie, names="servicio", values="pacientes", hole=0.5, color_discrete_sequence=ACTIVITY_SEQ)
+        fig.update_traces(textinfo="percent", sort=False)
+        show(style_fig(fig, 360, "Pacientes por servicio"))
+    st.caption(f"Periodo del menú lateral ({start:%d/%m} al {end:%d/%m}). Línea punteada: umbral de alerta "
+               f"({fmt_num(config.OCCUPANCY_WARNING_PCT)} %). La ocupación usa camas físicas, igual que la página Hoy.")
 
 
 def _emergency_section(start, end) -> None:

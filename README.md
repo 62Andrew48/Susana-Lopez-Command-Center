@@ -21,16 +21,22 @@ Un MVP que unifica el extracto del HIS en una base SQLite y ofrece tres herramie
 
 ---
 
-## Ejecución en 2 pasos
+## Ejecución desde cero
+
+Requisitos: Python 3.10+ y los 7 archivos `.txt` del reto (no se versionan: son datos del hospital).
 
 ```bash
-# 0. (una vez) copia los 7 archivos .txt del reto en ./Datos/
-# 1. Instalar dependencias (Python 3.10+)
+git clone https://github.com/62Andrew48/Susana-Lopez-Command-Center.git
+cd Susana-Lopez-Command-Center
+python -m venv .venv
+source .venv/Scripts/activate      # Windows (Git Bash). En Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
-
-# 2. Ejecutar (la base hospital.db se construye sola en el primer arranque, ~20 s)
-streamlit run app.py
+# copiar Paciente.txt, Ingresos.txt, Atencion.txt, Triage.txt, Servicios.txt,
+# MedicamentoInsumo.txt y ProgramacionCirugia.txt en ./Datos/
+streamlit run app.py               # abre http://localhost:8501; hospital.db se construye sola (~20 s)
 ```
+
+Si faltan archivos en `Datos/`, la app lo dice en pantalla y no arranca a medias.
 
 Opcional:
 
@@ -39,12 +45,34 @@ cp .env.example .env              # y configura LLM_PROVIDER + API key para acti
 python database.py --rebuild      # reconstruir la base manualmente
 uvicorn api:app --port 8000       # API REST -> http://localhost:8000/docs
 python agent.py                   # demo por consola de las 4 preguntas
-python -m pytest -q               # 65 pruebas (seguridad, intenciones, LLM simulado, ciclo clínico, RBAC)
+python -m pytest -q               # 110 pruebas (seguridad, intenciones, LLM simulado, ciclo clínico, RBAC, operación)
 ```
 
 Sin `.env` todo funciona en modo **Plan B** (sin red y sin costo).
 
 ---
+
+## Versión 3: una pantalla por pregunta
+
+La interfaz se reorganizó para que cada rol vea primero lo que tiene que hacer, no el histórico:
+
+- **Hoy** (inicio): cuatro cifras del día, **"Qué hacer ahora"** con el botón que lo resuelve y la **cola de
+  urgencias** a la hora del reloj clínico (códigos `URG-xxxx` no reversibles, sin nombres). El paciente ve sus
+  medicamentos por reclamar y su próxima cita.
+- **Mapa de camas** por piso, habitación y cama. El piso y la habitación salen del código del HIS
+  (`H-203C` = piso 2, habitación 203, cama C). Buscador de un clic: *¿dónde hay cama libre para un adulto, un niño,
+  un recién nacido, maternidad o UCI?* Las camas virtuales se muestran como **capacidad de expansión**.
+- **Campana de notificaciones** por rol, con enlace a donde se resuelve cada aviso.
+- **Asistente flotante** en todas las páginas, con alcance por permisos:
+
+| Rol | Qué puede preguntar |
+|---|---|
+| Admin y Médico | Toda la base analítica anonimizada (LLM o Plan B), ubicación de camas, glosario; ve el SQL |
+| Enfermería | Camas, inventario, rotación, espera en urgencias, alertas y glosario. Sin SQL libre ni LLM |
+| Paciente | Solo sus fórmulas y citas, y el glosario. Nunca consulta la base del hospital |
+
+- **Glosario del sector salud** (tomado del glosario entregado con el reto): al pasar el cursor por un término y
+  en el chat ("¿qué es triage II?").
 
 ## Versión 2: módulo clínico con roles (RBAC)
 
@@ -54,24 +82,28 @@ muestra a cada rol solo sus secciones:
 
 | Sección | Admin | Doctor | Enfermería | Paciente |
 |---|:-:|:-:|:-:|:-:|
-| Tablero (KPIs directivos, camas, urgencias, epidemiología) | ✓ completo | camas y urgencias | camas y urgencias | |
-| Asistente IA (NL2SQL) | ✓ | ✓ | | |
+| Hoy (acciones del turno y cola de urgencias) | ✓ | ✓ | ✓ | ✓ (sus pendientes) |
+| Mapa de camas | ✓ | ✓ | ✓ | |
+| Indicadores (KPIs, tendencias, camas, urgencias, epidemiología) | ✓ completo | camas y urgencias | camas y urgencias | |
+| Asistente IA (página completa con SQL) | ✓ | ✓ | | |
+| Asistente flotante | ✓ | ✓ | limitado | solo sus datos |
 | Alertas y acciones (semáforo, orden de compra, acciones) | ✓ + CSV | ✓ | ✓ | |
 | Clínico y farmacia (historias, prescripción, dispensación) | | ✓ | ✓ (sin prescribir) | |
-| Mi portal (fórmulas y citas propias) | | | | ✓ |
+| Mis fórmulas y citas | | | | ✓ |
 | Datos y auditoría (extractos, bitácora) | ✓ | | | |
 
 `clinico.db` se crea y se siembra sola en el primer arranque: 4 usuarios de demostración, turnos diurnos y
 6 historias clínicas sobre pacientes e ingresos **reales** del extracto. Las fórmulas y las citas son **sintéticas**.
-El menú "🕒 Reloj de demo" cambia a turno nocturno o reinicia el escenario sin tocar la base analítica.
+El reloj de la cabecera (🕒) cambia a turno nocturno o reinicia el escenario sin tocar la base analítica.
 
 ### Guion de demostración (≈4 minutos)
 
-1. **Admin** → Tablero: 5 KPIs y 3 alertas críticas. En Alertas, el semáforo y la orden de compra en CSV.
+1. **Admin** → Hoy: 86,3 % de camas físicas ocupadas y "Hospitalización 2 al 100 %" con la cama libre más cercana
+   ya ubicada → **Ver camas** → Piso 1. En la burbuja: *"¿Dónde hay camas libres para pediatría en el piso 4?"*.
 2. **Dra. Ruiz** → Clínico y farmacia: la historia del paciente 110 con su línea de tiempo inmutable.
 3. **Enf. Gómez** → Dispensación → **"Simular avance de 72 horas"**: 15 dosis de acetaminofén y 10 de enoxaparina
    vuelven a stock. La enoxaparina, de continuidad crítica, genera una alerta en lugar de un bloqueo.
-4. **Paciente 110** → Mi portal: la fórmula aparece caducada → "Solicitar cita".
+4. **Paciente 110** → la campana avisa "Tu fórmula venció" → Mis fórmulas y citas → "Solicitar cita".
 5. **Dra. Ruiz** → Prescripción: "Atender cita" levanta el bloqueo.
 6. Reloj → **Turno de noche** → Historias: el acceso queda bloqueado → "Romper el vidrio" con justificación.
 7. **Admin** → Datos y auditoría → Bitácora: el acceso de emergencia aparece registrado.
@@ -136,11 +168,14 @@ sequenceDiagram
 | `config.py` | — | Variables de `.env`, rutas y umbrales de negocio |
 | `database.py` | Modelo | ETL, 12 tablas indexadas, funciones de KPI reutilizables |
 | `agent.py` | Controlador | NL2SQL, `SQLGuard`, ejecutor seguro, Plan B, `RecommendationEngine`, Factory de LLM |
-| `app.py` + `ui/` | Vista | Cabecera contextual, navegación por rol y páginas (analíticas y clínicas) |
+| `app.py` + `ui/` | Vista | Cabecera, menú por permisos y páginas: `pages_hoy`, `pages_camas`, `pages_analytics`, `pages_clinical` |
+| `ui/assistant_scope.py` | Controlador | Qué puede responder el asistente según los permisos del rol |
+| `ui/notifications.py` | Servicio | Notificaciones por rol (lógica pura, probada) |
+| `ui/glossary.py` | — | Términos del sector salud en lenguaje sencillo |
 | `pharmacy_service.py` | Servicio | Ciclo de prescripción, caducidad con retorno a stock y autorización RBAC |
 | `demo_seed.py` | — | Escenario de demostración y reloj clínico |
 | `api.py` | Servicio | Endpoints REST del reto |
-| `tests/` | — | Pruebas de seguridad, intenciones y flujo LLM |
+| `tests/` | — | 110 pruebas: seguridad SQL, intenciones, LLM simulado, ciclo clínico, RBAC, camas, cola, notificaciones y alcance del asistente |
 
 ## Modelo de datos (`hospital.db`)
 
@@ -175,6 +210,18 @@ Estas decisiones salieron de perfilar el extracto antes de programar; conviene m
 - **No hay existencias de farmacia.** El consumo diario es real; el stock se simula de forma determinística y
   queda marcado (`stock_simulado = 1`). Si farmacia entrega `Datos/Inventario.txt` (`CodigoServicio|Stock`),
   el cálculo pasa a ser real sin tocar código.
+- **Camas físicas y virtuales.** El HIS registra 223 camas "virtuales" fuera de Urgencias (capacidad de
+  expansión). La página Hoy, el mapa y la tendencia calculan la ocupación sobre las **300 camas físicas**
+  (86,3 % el 21/09) y muestran aparte los pacientes en camas de expansión (108).
+- **Ubicación física.** El código de cama trae piso y habitación en hospitalización y gineco-obstetricia
+  (`H-203C`, `G-108B`); las demás unidades solo traen unidad y número. Los datos no traen pasillo ni ala.
+- **Cola de urgencias.** Un paciente está "esperando" a la hora `t` si ingresó por urgencias antes de `t` y su
+  primera atención (`FechaAtencion`) es posterior a `t`. El extracto llega hasta el 21/09 a las 14:33.
+- **Triage:** 17.781 filas en el extracto, 16.106 con `OidTriage`; las 1.675 restantes no tienen identificador
+  (el diccionario de datos indica que acepta nulos), no son filas perdidas.
+- **Programación quirúrgica sin fecha.** Según el diccionario, `ProgramacionCirugia` solo trae consecutivo,
+  paciente, ingreso y código de servicio. La fecha y el quirófano se derivan de los servicios prestados en
+  áreas de QUIRÓFANOS del mismo ingreso.
 - **Cirugías:** solo 1.345 de 6.156 programaciones tienen su ingreso dentro del extracto; el cumplimiento se
   calcula sobre ellas (97 %).
 
@@ -233,6 +280,12 @@ FastAPI (integración con el HIS), SQLite (cero instalación), LLM intercambiabl
 - *¿Y si el LLM inventa un SQL peligroso?* Tres barreras: filtro, conexión de solo lectura y authorizer del motor.
 - *¿Por qué la ocupación histórica de UCI es baja?* Explicar el sesgo de "última cama" y la serie de días-cama.
 - *¿El stock es real?* No; está marcado como simulado y se reemplaza con un archivo de farmacia.
+- *¿Por qué SQLite y no PostgreSQL?* Es la opción recomendada por el reto: sin servidor, la demo arranca en
+  cualquier equipo. El acceso a datos está aislado en `database.py`; migrar es cambiar la conexión.
+- *El modelo sugerido traía fecha de salida, médico asignado y fecha de vencimiento, ¿dónde están?* No existen
+  en el extracto entregado. Por eso la estancia se estima y el stock se simula, y así se declara en pantalla.
+- *¿Hay login?* Hay control de acceso por roles y permisos en base de datos (con auditoría); el ingreso es un
+  selector de usuarios de demostración. El esquema ya guarda la contraseña con hash, falta la pantalla de login.
 
 ## Limitaciones y mejoras futuras
 
@@ -242,7 +295,7 @@ FastAPI (integración con el HIS), SQLite (cero instalación), LLM intercambiabl
 | Extracto histórico sin egresos ni traslados de cama | Integración en tiempo real con la Historia Clínica Electrónica (HL7 FHIR) |
 | Stock simulado | Conector al inventario de farmacia |
 | Alertas por reglas y umbrales | **Machine learning** (Prophet / gradient boosting) para pronosticar ingresos y consumo por patología |
-| Sin autenticación | Login con JWT y roles (directivo, jefe de servicio, farmacia) |
+| Ingreso con selector de usuarios de demostración (el RBAC y la auditoría sí son reales) | Pantalla de login con contraseña (hash ya en el esquema) y sesión con JWT |
 
 ## Tecnologías
 
@@ -253,7 +306,6 @@ LLM opcional: OpenAI, Anthropic u Ollama.
 
 | Integrante | Rol |
 |---|---|
-| _(nombre)_ | Datos y ETL |
-| _(nombre)_ | Agente IA y seguridad |
-| _(nombre)_ | Tablero y experiencia de usuario |
-| _(nombre)_ | Documentación, pruebas y pitch |
+| Sebastián Moncayo Ordoñez | Dirección del proyecto, experiencia por rol (Hoy, mapa de camas, notificaciones, asistente) |
+| _(nombre)_ | _(rol)_ |
+| _(nombre)_ | _(rol)_ |

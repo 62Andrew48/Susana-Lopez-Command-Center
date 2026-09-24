@@ -811,6 +811,31 @@ def bed_map(conn, day: date | None = None) -> pd.DataFrame:
                                                   na_position="last").reset_index(drop=True)
 
 
+def physical_occupancy_trend(conn, start: date, end: date) -> pd.DataFrame:
+    """Ocupación diaria de camas FÍSICAS de internación por servicio (sin Urgencias ni camas virtuales).
+    Misma regla que bed_map, así la serie y la foto del día coinciden."""
+    lo, hi = day_bounds(start, end)
+    beds = query_df(conn, "SELECT codigo_cama, servicio FROM camas WHERE es_virtual = 0 AND servicio <> 'Urgencias'")
+    stays = query_df(conn, """
+        SELECT codigo_cama, fecha_inicio_estancia AS d0, fecha_fin_estimada AS d1 FROM ingresos
+         WHERE fecha_inicio_estancia <= ? AND fecha_fin_estimada >= ?""", (hi, lo))
+    stays = stays[stays["codigo_cama"].isin(beds["codigo_cama"])]
+    days = pd.date_range(start, end, freq="D")
+    if stays.empty:
+        return pd.DataFrame(columns=["fecha", "servicio", "capacidad", "camas_ocupadas", "porcentaje_ocupacion"])
+    d0 = pd.to_datetime(stays["d0"]).dt.normalize().clip(lower=days[0])
+    d1 = pd.to_datetime(stays["d1"]).dt.normalize().clip(upper=days[-1])
+    stays = stays.assign(fecha=[pd.date_range(a, b, freq="D") for a, b in zip(d0, d1)]).explode("fecha")
+    stays = stays.dropna(subset=["fecha"]).merge(beds, on="codigo_cama")
+    occ = stays.groupby(["fecha", "servicio"])["codigo_cama"].nunique().rename("camas_ocupadas")
+    cap = beds.groupby("servicio").size().rename("capacidad")
+    grid = pd.MultiIndex.from_product([days, cap.index], names=["fecha", "servicio"])
+    out = occ.reindex(grid, fill_value=0).reset_index().merge(cap.reset_index(), on="servicio")
+    out["porcentaje_ocupacion"] = (out["camas_ocupadas"] / out["capacidad"] * 100).round(1)
+    out["fecha"] = out["fecha"].dt.strftime("%Y-%m-%d")
+    return out
+
+
 def free_beds(conn, day: date | None = None, subgroup: str | None = None, population: str | None = None,
               limit: int = 10) -> pd.DataFrame:
     """Camas físicas libres de internación (sin Urgencias), primero las que tienen piso y habitación."""
