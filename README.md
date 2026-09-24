@@ -287,7 +287,8 @@ sequenceDiagram
 | `api.py` | Servicio | Endpoints REST del reto |
 | `ml_services.py` | Servicio | Cliente de los microservicios con tiempo máximo y circuit breaker |
 | `auth.py` | Servicio | Inicio y cierre de sesión con bloqueo por intentos y auditoría |
-| `tests/` | — | 129 pruebas: seguridad SQL, intenciones, LLM simulado, ciclo clínico, RBAC, camas, cola, notificaciones y alcance del asistente |
+| `extract_upload.py` | Servicio | Convierte el extracto subido en Excel (.xlsx/.xls), CSV o .txt al formato '\|' del HIS, validando nombre y columnas |
+| `tests/` | — | 236 pruebas: seguridad SQL, intenciones, LLM simulado, ciclo clínico, RBAC, camas, cola, notificaciones, alcance del asistente, concurrencia y carga de extractos |
 
 ## Modelo de datos (`hospital.db`)
 

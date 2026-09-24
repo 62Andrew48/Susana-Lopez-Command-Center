@@ -150,5 +150,10 @@ def answer(question: str, name: str, data: bytes, mime: str | None = None) -> Ag
                 pass
         return AgentResponse(q, "Para analizar imágenes se necesita la IA con visión (Gemini). Configura "
                                 "LLM_PROVIDER=gemini y GEMINI_API_KEY en el archivo .env.", engine="archivo")
+    except ImportError:  # .xls (Excel 97-2003) necesita xlrd
+        return AgentResponse(q, "Para leer Excel antiguo (.xls) falta instalar xlrd (pip install -r requirements.txt). "
+                                "Mientras tanto, guárdalo como .xlsx y súbelo de nuevo.", engine="archivo")
     except Exception as exc:  # archivo dañado o formato raro: respuesta clara, sin tumbar la página
-        return AgentResponse(q, f"No pude leer el archivo: {type(exc).__name__}.", engine="archivo")
+        return AgentResponse(q, f"No pude leer el archivo ({type(exc).__name__}). Si es Excel, ábrelo y guárdalo "
+                                "como .xlsx; si es CSV, revisa que esté separado por comas o punto y coma.",
+                             engine="archivo")

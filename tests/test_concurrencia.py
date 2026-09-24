@@ -60,3 +60,10 @@ def test_procedimiento_por_nombre_con_grafica_y_sin_inventar():
     v = agent.ask("generame una grafica de los pacientes atendidos por basectomia")
     assert "no registra ningún procedimiento" in v.answer and v.data is None   # no existe en el extracto
     assert agent.ask("¿Cuántas camas de UCI están ocupadas hoy?").answer.startswith("**Hoy")
+
+
+def test_cuantas_personas_atendidas_en_urgencias_sin_ia():
+    agent = HospitalAgent(provider="none", mode="rules")
+    r = agent.ask("cuantas personas son atendidas en urgencias")
+    assert "personas llegaron por urgencias" in r.answer and r.data is not None
+    assert "personas" in agent.ask("cuánta gente ingresó a pediatría esta semana").answer

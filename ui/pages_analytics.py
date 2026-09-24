@@ -13,6 +13,7 @@ import streamlit as st
 
 import config
 import database as db
+import extract_upload as xu
 import pharmacy_service as ps
 import reports
 from agent import KEY_QUESTIONS, AgentResponse, fmt_minutes, fmt_num
@@ -484,23 +485,36 @@ def page_datos() -> None:
                                    "warn" if info.get("stock_simulado") == "1" else "ok")]), unsafe_allow_html=True)
         grid([card(t.replace("_", " ").capitalize(), "filas", BLUE, big=fmt_num(n)) for t, n in counts.items()])
         section_title("Cargar un nuevo extracto del HIS")
-        st.caption("Sube los 7 archivos .txt delimitados por '|' (y opcionalmente Inventario.txt con "
-                   "CodigoServicio|Stock). La base analítica se reconstruye en frío; la base clínica no se toca.")
-        uploads = st.file_uploader("Archivos", type=["txt"], accept_multiple_files=True,
+        if msg := st.session_state.pop("extracto_msg", None):
+            st.success(msg)
+        st.caption("Sube las 7 tablas del extracto en **Excel (.xlsx/.xls), CSV o .txt delimitado por '|'**, "
+                   "con el nombre de la tabla (Paciente, Ingresos, Atencion, Triage, Servicios, MedicamentoInsumo, "
+                   "ProgramacionCirugia; opcional Inventario con CodigoServicio y Stock) y las mismas columnas del "
+                   "extracto. La base analítica se reconstruye en frío; la base clínica no se toca.")
+        uploads = st.file_uploader("Archivos", type=list(xu.EXTENSIONS), accept_multiple_files=True,
                                    label_visibility="collapsed")
         if uploads and st.button("Reconstruir base analítica", type="primary"):
-            valid = set(db.SOURCE_FILES.values()) | {db.OPTIONAL_STOCK_FILE}
-            saved = [f.name for f in uploads if f.name in valid]
+            ready, problems = {}, []
             for f in uploads:
-                if f.name in valid:
-                    (config.DATA_DIR / f.name).write_bytes(f.getbuffer())
-            ignored = [f.name for f in uploads if f.name not in valid]
-            if ignored:
-                st.warning("Se ignoraron archivos con nombre no reconocido: " + ", ".join(ignored))
-            if saved:
+                try:
+                    name, content, rows = xu.convert(f.name, bytes(f.getbuffer()))
+                    ready[name] = (content, rows, f.name)
+                except ValueError as exc:
+                    problems.append(str(exc))
+                except Exception as exc:  # archivo dañado o protegido
+                    problems.append(f"{f.name}: no se pudo leer ({type(exc).__name__}).")
+            for msg in problems:
+                st.warning(msg)
+            if ready and not problems:
+                for name, (content, _, _) in ready.items():
+                    (config.DATA_DIR / name).write_bytes(content)
+                st.session_state["extracto_msg"] = ("Convertidos: " + ", ".join(f"{src} → {name} ({fmt_num(rows)} filas)"
+                                                       for name, (_, rows, src) in ready.items()))
                 ctx.reset_analytics_resources()
-                ctx.build_analytics_with_status(f"Reconstruyendo con {len(saved)} archivo(s)...", rebuild=True)
+                ctx.build_analytics_with_status(f"Reconstruyendo con {len(ready)} archivo(s)...", rebuild=True)
                 st.rerun()
+            elif problems:
+                st.error("No se cambió nada: corrige los archivos señalados y vuelve a subirlos.")
         with st.expander("Método de cálculo y supuestos"):
             st.markdown(f"""
 - **'Hoy' analítico** = {info['fecha_referencia']}, última fecha de ingreso del extracto.

@@ -366,6 +366,11 @@ def parse_period(question: str, ref: date, default: str = "mes") -> tuple[date, 
     return ref.replace(day=1), ref, "mes en curso"
 
 
+ADMISSIONS_Q = (r"cuant[oa]s? (pacientes|personas|gente|usuarios|ingresos|admisiones|atenciones)|cuanta gente|"
+                r"ingresos por dia|volumen de (pacientes|atenciones)|"
+                r"(personas|pacientes|gente|usuarios).{0,40}(atendid|atienden|ingresar|ingresa|llegar|llegaron|llegan|"
+                r"vinieron|vienen|entraron)|(atendid|ingresad)[oa]s? en\b")
+
 PROCEDURE_SUFFIX = (r"\w+(ectomia|otomia|ostomia|plastia|scopia|rrafia|centesis|pexia|tripsia|grafia)\b|"
                     r"\b(cesar[ei]as?|legrado|biopsias?|circuncision|curetaje|cateterismo|endoscopia|dialisis)\b")
 PROCEDURE_Q = (r"(atendid|operad|intervenid|realizad|practicad|tratad|hicieron|se hizo|les hicieron)\w*\s+(por|de|con|una|un)\s"
@@ -837,8 +842,7 @@ GROUP BY especialidad ORDER BY servicios DESC LIMIT 10
             Intent("tendencia", rx(r"tendencia|pico|aument|predic|proyecc|crec"), HospitalAgent._h_trend, 42),
             Intent("demografia", rx(r"genero|sexo|regimen|eps|asegurador|edad|zona|municipio"),
                    HospitalAgent._h_demographics, 55),
-            Intent("ingresos", rx(r"cuant[oa]s? (pacientes|ingresos|admisiones)|ingresos por dia"),
-                   HospitalAgent._h_admissions, 60),
+            Intent("ingresos", rx(ADMISSIONS_Q), HospitalAgent._h_admissions, 60),
         ]
 
     # --- Handlers (cada uno ejecuta SQL real y visible) --------------------------
@@ -969,6 +973,8 @@ GROUP BY {level} ORDER BY pacientes DESC""")
 
     def _h_procedure(self, question: str) -> AgentResponse:
         term = procedure_term(question)
+        if term and not re.search(PROCEDURE_SUFFIX, normalize(question)) and detect_service(term):
+            return self._h_admissions(question)          # «atendidos por urgencias» es un servicio, no un procedimiento
         if not term:
             return AgentResponse(question, "Dime el nombre del procedimiento, por ejemplo: «pacientes atendidos por "
                                            "apendicectomía».", engine="reglas")
@@ -1096,14 +1102,28 @@ GROUP BY p.{col} ORDER BY pacientes DESC LIMIT 15""")
                              chart={"type": "pie" if len(df) <= 6 else "bar", "x": col, "y": "pacientes"})
 
     def _h_admissions(self, question: str) -> AgentResponse:
+        """¿Cuántas personas se atendieron? Total del periodo, filtrado por servicio si se nombra.
+        Urgencias = llegaron por la vía de urgencias (así ingresa el 96 % de los pacientes del extracto)."""
         start, end, label = parse_period(question, self.ref, default="mes")
+        service = detect_service(question)
+        if service == "Urgencias":
+            where, scope = "AND via_ingreso = 'Urgencias'", "llegaron por urgencias"
+        elif service:
+            where, scope = f"AND servicio = '{service}'", f"ingresaron a {service}"
+        else:
+            where, scope = "", "ingresaron al hospital"
         sql, df = self._query(f"""
-SELECT date(fecha_ingreso) AS fecha, COUNT(*) AS ingresos, COUNT(DISTINCT id_paciente) AS pacientes
-FROM ingresos WHERE fecha_ingreso BETWEEN {lit(start)} AND {lit(end, True)}
+SELECT date(fecha_ingreso) AS fecha, COUNT(DISTINCT id_paciente) AS pacientes, COUNT(*) AS ingresos
+FROM ingresos WHERE fecha_ingreso BETWEEN {lit(start)} AND {lit(end, True)} {where}
 GROUP BY 1 ORDER BY 1""")
-        answer = (f"**{fmt_num(df['ingresos'].sum())} ingresos** en el periodo {label} "
-                  f"(promedio {fmt_num(df['ingresos'].mean(), 1)} por día).")
-        return AgentResponse(question, answer, sql, df, chart={"type": "line", "x": "fecha", "y": "ingresos"})
+        if df.empty:
+            return AgentResponse(question, f"No hay ingresos que {scope.split()[0]} en {label}.", sql, df)
+        people = self.conn.execute(f"SELECT COUNT(DISTINCT id_paciente) FROM ingresos WHERE fecha_ingreso BETWEEN "
+                                   f"{lit(start)} AND {lit(end, True)} {where}").fetchone()[0]
+        when = f"el {end:%d/%m/%Y}" if start == end else f"{label} ({start:%d/%m} al {end:%d/%m/%Y})"
+        answer = (f"**{fmt_num(people)} personas {scope}** {when}, en {fmt_num(df['ingresos'].sum())} ingresos "
+                  f"(promedio {fmt_num(df['pacientes'].mean(), 1)} personas por día).")
+        return AgentResponse(question, answer, sql, df, chart={"type": "line", "x": "fecha", "y": "pacientes"})
 
     def _h_alerts(self, question: str) -> AgentResponse:
         alerts = self.alerts()
@@ -1116,9 +1136,11 @@ GROUP BY 1 ORDER BY 1""")
     def _help(self, question: str) -> AgentResponse:
         return AgentResponse(
             question,
-            "No identifiqué la pregunta en el modo sin LLM. Prueba con: ocupación de camas (por servicio o UCI), "
-            "inventario o rotación de medicamentos, tiempos de espera en urgencias, servicio con más ingresos, "
-            "diagnósticos, especialidades, cirugías, tendencias de demanda o alertas.", engine="reglas")
+            "No entendí esa pregunta sin la IA activada (modo Plan B). Prueba con preguntas como: «¿cuántas personas "
+            "llegaron por urgencias este mes?», «camas de UCI ocupadas hoy», «medicamentos con menos de 5 días de "
+            "inventario», «espera en urgencias esta semana», «pacientes atendidos por apendicectomía», «servicio con "
+            "más ingresos», «diagnósticos más frecuentes», «reporte del mes» o «alertas». Con la IA configurada "
+            "(Gemini en el .env) entiendo cualquier pregunta.", engine="reglas")
 
 
 # ---------------------------------------------------------------------------
