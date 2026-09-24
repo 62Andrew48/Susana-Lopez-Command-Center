@@ -13,7 +13,7 @@ import streamlit as st
 import auth
 import mailer
 from ui import context as ctx
-from ui.theme import BORDER, BRAND_GREEN, MUTED, NAVY, TEXT, esc
+from ui.theme import BRAND_GREEN, NAVY, esc
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
 LOGO, LOGO_ICON = ASSETS / "logo_hslv.png", ASSETS / "logo_hslv_icono.png"
@@ -213,12 +213,12 @@ def _registration() -> None:
 
 
 def login_page() -> None:
-    st.markdown(f"""<style>
-      [data-testid="stSidebar"], header[data-testid="stHeader"] {{display:none;}}
-      [data-testid="stMainBlockContainer"] {{max-width:440px; padding-top:3rem;}}
-      .login-brand {{text-align:center; margin-bottom:1.2rem;}}
-      .login-brand h2 {{color:{NAVY}; font-size:1.35rem; margin:0.6rem 0 0.1rem;}}
-      .login-brand p {{color:{MUTED}; font-size:0.9rem; margin:0;}}
+    st.markdown("""<style>
+      [data-testid="stSidebar"], header[data-testid="stHeader"] {display:none;}
+      [data-testid="stMainBlockContainer"] {max-width:440px; padding-top:3rem;}
+      .login-brand {text-align:center; margin-bottom:1.2rem;}
+      .login-brand h2 {color:var(--brand); font-size:1.35rem; margin:0.6rem 0 0.1rem;}
+      .login-brand p {color:var(--muted); font-size:0.9rem; margin:0;}
     </style>""", unsafe_allow_html=True)
     st.markdown(f'<div class="login-brand">{logo_html(88)}<h2>Hospital Susana López de Valencia</h2>'
                 '<p>Centro de mando · inicia sesión para continuar</p></div>', unsafe_allow_html=True)
@@ -250,19 +250,19 @@ def user_card() -> None:
     status = ""
     if user["rol"] in ("DOCTOR", "ENFERMERIA"):
         turno = ctx.shift()
-        status = (f'<span style="color:#059669">● En turno hasta {turno["fin"][11:16]}</span>' if turno
-                  else '<span style="color:#B45309">● Fuera de turno</span>')
+        status = (f'<span style="color:var(--c-ok)"><span class="dot"></span> En turno hasta {turno["fin"][11:16]}</span>' if turno
+                  else '<span style="color:var(--c-warn)"><span class="dot"></span> Fuera de turno</span>')
     elif user["rol"] == "ADMIN":
-        status = '<span style="color:#059669">● Activo</span>'
+        status = '<span style="color:var(--c-ok)"><span class="dot"></span> Activo</span>'
     st.markdown(f"""<style>
       .st-key-user_card {{position:fixed; bottom:12px; left:12px; width:calc(var(--sidebar-width, 300px) - 40px);
-          max-width:276px; background:#FFF; border:1px solid {BORDER}; border-radius:12px; padding:0.6rem 0.7rem;
-          box-shadow:0 2px 8px rgba(0,0,0,.06); z-index:999;}}
+          max-width:276px; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:0.6rem 0.7rem;
+          box-shadow:var(--shadow); z-index:999;}}
       .u-row {{display:flex; align-items:center; gap:0.6rem;}}
       .u-av {{width:2.3rem; height:2.3rem; border-radius:50%; background:{color}; color:#FFF; font-weight:700;
           display:flex; align-items:center; justify-content:center; font-size:0.85rem; flex:none;}}
-      .u-name {{font-weight:650; color:{TEXT}; font-size:0.88rem; line-height:1.2;}}
-      .u-meta {{font-size:0.72rem; color:{MUTED}; line-height:1.3;}}
+      .u-name {{font-weight:650; color:var(--text); font-size:0.88rem; line-height:1.2;}}
+      .u-meta {{font-size:0.72rem; color:var(--muted); line-height:1.3;}}
       [data-testid="stSidebarUserContent"] {{padding-bottom:7rem;}}
     </style>""", unsafe_allow_html=True)
     with st.sidebar.container(key="user_card"):

@@ -3,8 +3,8 @@ reports.py — Archivos Excel legibles para gerencia (openpyxl): encabezado del 
 columnas en español, anchos, colores del semáforo y totales. No depende de Streamlit.
 
   * purchase_order_xlsx : orden de compra de los ítems urgentes (reemplaza al CSV con punto y coma).
-  * executive_report_xlsx: informe ejecutivo (situación actual, pronósticos en lenguaje claro, compras
-                           urgentes, urgencias por turno). Un área sin pronóstico dice "Estimación no
+  * executive_report_xlsx: informe ejecutivo (resumen para el administrador, situación actual, pronósticos
+                           en lenguaje claro, compras urgentes, urgencias por turno). Un área sin pronóstico dice "Estimación no
                            disponible para esta área" y el resto del informe se genera igual.
 Todas las cifras llegan ya calculadas desde los datos; aquí solo se da formato.
 """
@@ -133,6 +133,21 @@ def purchase_order_xlsx(items: list[dict], cutoff: str, generated_by: str = "") 
 # ---------------------------------------------------------------------------
 # Informe ejecutivo
 # ---------------------------------------------------------------------------
+ADMIN_QUESTIONS = [("what", "¿Qué está ocurriendo?"), ("when", "¿En qué periodo?"),
+                   ("changes", "¿Qué cambio se espera?"), ("resources", "¿Qué recursos podrían verse afectados?"),
+                   ("review", "¿Qué debería revisar el administrador?")]
+ADMIN_EMPTY = {"resources": "Ninguno por encima de lo habitual.", "review": "Nada adicional.", "changes": "Sin datos."}
+ADMIN_NOTE = ("Las sugerencias son puntos de revisión, no órdenes de compra ni de contratación: los modelos "
+              "estiman cuántas atenciones habrá, no cuántos recursos se necesitan.")
+
+
+def _admin_rows(admin: dict | None) -> list[tuple[str, str | list[str]]]:
+    """[(pregunta, respuesta)] del resumen para el administrador (forecast_text.admin_summary().__dict__)."""
+    if not admin:
+        return []
+    return [(q, admin.get(k) or ADMIN_EMPTY.get(k, "—")) for k, q in ADMIN_QUESTIONS]
+
+
 def executive_report_xlsx(data: dict) -> bytes:
     """data = {
         cutoff, generated_by,
@@ -150,6 +165,19 @@ def executive_report_xlsx(data: dict) -> bytes:
     row = _header(ws, "Informe ejecutivo de operación y alerta temprana",
                   f"Fecha de corte {data['cutoff']}" + (f" · generado por {data['generated_by']}"
                                                        if data.get("generated_by") else ""), span)
+    admin = _admin_rows(data.get("admin"))
+    if admin:
+        row = _section(ws, row, "Resumen para el administrador", span)
+        rows = [[q, "\n".join(f"• {x}" for x in a) if isinstance(a, list) else a, ""] for q, a in admin]
+        start = row
+        row = _table(ws, row, ["Pregunta", "Respuesta", ""], rows, [30, 22, 64],
+                     tones=[data["admin"].get("tone")] + [None] * (len(rows) - 1))
+        for r in range(start + 1, start + 1 + len(rows)):  # la respuesta ocupa las dos columnas de la derecha
+            ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+            ws.row_dimensions[r].height = max(30, 15 * (str(ws.cell(row=r, column=2).value).count("\n") + 1) + 6)
+        ws.cell(row=start, column=2).value = "Respuesta"
+        ws.merge_cells(start_row=start, start_column=2, end_row=start, end_column=3)
+        row = _paragraph(ws, row - 1, ADMIN_NOTE, span, height=28) + 1
     row = _section(ws, row, "Resumen", span)
     row = _paragraph(ws, row, data.get("summary", ""), span, height=80) + 1
     row = _section(ws, row, "Situación actual", span)
@@ -164,18 +192,21 @@ def executive_report_xlsx(data: dict) -> bytes:
                "equipo. Las existencias de farmacia son simuladas; el consumo es real.", span, height=28)
 
     fc = wb.create_sheet("Pronósticos")
-    head = ["Área", "Qué se espera", "Rango normal", "Frente a lo habitual", "Confianza", "Qué hacer"]
+    head = ["Área", "Periodo", "Qué se espera", "Frente a lo habitual", "Por qué importa", "Qué conviene revisar",
+            "Confianza", "Datos recientes"]
     row = _header(fc, "Pronósticos para el siguiente día", f"Fecha de corte {data['cutoff']}", len(head))
     rows, tones = [], []
     for f in data.get("forecasts") or []:
         if f.get("unavailable"):
-            rows.append([f["area"], "Estimación no disponible para esta área", "", "", "", ""])
+            rows.append([f["area"], "", "Estimación no disponible para esta área", "", "", "", "", ""])
             tones.append("neutral")
             continue
-        rows.append([f["area"], f["headline"], f["range_text"], f"{f['level']}: {f['level_text']}",
+        change = f"{f['level']}. {f.get('change_text') or ''}".strip(". ") + f". {f['level_text']}"
+        rows.append([f["area"], f.get("period", ""), f"{f['headline']} {f['range_text']}", change, f.get("why", ""),
+                     "\n".join(f"• {a}" for a in f.get("review", [])),
                      f"{f['confidence']}: {f['confidence_text']}", "\n".join(f"• {a}" for a in f.get("actions", []))])
         tones.append(f.get("level_tone"))
-    _table(fc, row, head, rows, [16, 34, 22, 36, 44, 58], tones=tones)
+    _table(fc, row, head, rows, [15, 20, 34, 30, 32, 44, 40, 48], tones=tones)
     for r in range(row + 1, row + 1 + len(rows)):
         fc.row_dimensions[r].height = 105
 
@@ -251,7 +282,27 @@ def executive_report_pdf(data: dict) -> bytes:
     head = Table([[logo, title]], colWidths=[2.1 * cm, 15.4 * cm])
     head.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LINEBELOW", (0, 0), (-1, 0), 2, lime),
                               ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
-    story += [head, Spacer(1, 10), p("Resumen", h2), p(data.get("summary", ""), lead)]
+    story += [head, Spacer(1, 10)]
+    admin = _admin_rows(data.get("admin"))
+    if admin:
+        q_style = ParagraphStyle("q", parent=cell, fontName="Helvetica-Bold", textColor=navy)
+
+        def answer(a):
+            return bullets(a) if isinstance(a, list) else p(a, cell)
+
+        box = Table([[p("Resumen para el administrador", ParagraphStyle("at", parent=h2, spaceBefore=0)), ""]]
+                    + [[p(q, q_style), answer(a)] for q, a in admin]
+                    + [[p(ADMIN_NOTE, small), ""]], colWidths=[5.2 * cm, 12.3 * cm])
+        box.setStyle(TableStyle([("SPAN", (0, 0), (1, 0)), ("SPAN", (0, -1), (1, -1)),
+                                 ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F9FC")),
+                                 ("LINEBEFORE", (0, 0), (0, -1), 3, tone.get(data["admin"].get("tone"), navy)
+                                  if data["admin"].get("tone") != "ok" else green),
+                                 ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D5DBE3")),
+                                 ("LINEBELOW", (0, 1), (-1, -2), 0.3, colors.HexColor("#E3E8EF")),
+                                 ("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 5),
+                                 ("BOTTOMPADDING", (0, 0), (-1, -1), 5), ("LEFTPADDING", (0, 0), (-1, -1), 8)]))
+        story += [box, Spacer(1, 6)]
+    story += [p("Resumen", h2), p(data.get("summary", ""), lead)]
 
     sit = data.get("situation") or []
     story += [p("Situación actual", h2),
@@ -265,12 +316,21 @@ def executive_report_pdf(data: dict) -> bytes:
                            "al generar el informe.", small))
             story.append(KeepTogether(block))
             continue
+        if f.get("period"):
+            block.append(p(f"Periodo: {f['period']}", small))
         block += [p(f"{f['headline']} {f['range_text']}", lead),
                   table(["Frente a lo habitual", "Confianza del pronóstico"],
                         [[f"{f['level']}. {f['level_text']}", f"{f['confidence']}. {f['confidence_text']}"]],
                         [8.2 * cm, 9.3 * cm], tones=[f.get("level_tone")])]
+        if f.get("why"):
+            block += [Spacer(1, 4), Paragraph(f"<b>Por qué importa.</b> {x(f['why'])}", base)]
+        if f.get("review"):
+            block += [Spacer(1, 3), p("Qué conviene revisar", ParagraphStyle("rv", parent=base, fontName="Helvetica-Bold")),
+                      bullets(f["review"])]
         if f.get("actions"):
-            block += [Spacer(1, 4), bullets(f["actions"])]
+            block += [Spacer(1, 3), p("Lo que muestran los datos recientes",
+                                      ParagraphStyle("dr", parent=base, fontName="Helvetica-Bold")),
+                      bullets(f["actions"])]
         notes = [nt for nt in f.get("notes") or [] if "supera" not in nt.lower()]
         notes.sort(key=lambda nt: 0 if ("programacion" in nt or "esquema" in nt.lower()) else 1)  # la del dato primero
         for nt in notes[:2]:

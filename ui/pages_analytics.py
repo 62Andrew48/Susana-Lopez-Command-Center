@@ -66,12 +66,16 @@ def page_tablero() -> None:
                      f"{occ_global['ocupadas']} de {occ_global['capacidad']} camas",
                      tone=occupancy_color(occ_global["porcentaje"]),
                      hint="Camas físicas con paciente en el día. Excluye camas virtuales de Urgencias."),
-            kpi_card("Espera en urgencias", fmt_minutes(waits["promedio_min"]),
-                     f"Mediana {fmt_minutes(waits['mediana_min'])} · P90 {fmt_minutes(waits['p90_min'])}",
-                     tone=BLUE, delta=delta, delta_good=good),
-            kpi_card("Stock crítico", f"{fmt_num(len(crit))} ítems", "< 5 días · stock simulado",
-                     tone=RED if len(crit) else EMERALD),
-            kpi_card("Cumplimiento quirúrgico", f"{fmt_num(pct, 1)} %" if pct is not None else "N/D",
+            kpi_card("Espera promedio en urgencias", fmt_minutes(waits["promedio_min"]),
+                     f"La mitad esperó menos de {fmt_minutes(waits['mediana_min'])} · 1 de cada 10, más de "
+                     f"{fmt_minutes(waits['p90_min'])}",
+                     tone=BLUE, delta=delta, delta_good=good,
+                     hint="Tiempo desde la llegada hasta la atención, en el periodo elegido. "
+                          "Técnico: mediana y percentil 90."),
+            kpi_card("Medicamentos por agotarse", f"{fmt_num(len(crit))} ítems", "Se acaban en menos de 5 días",
+                     tone=RED if len(crit) else EMERALD,
+                     hint="Existencias simuladas frente al consumo real de los últimos 30 días."),
+            kpi_card("Cirugías realizadas de las programadas", f"{fmt_num(pct, 1)} %" if pct is not None else "N/D",
                      f"{surg['realizadas']} de {surg['programadas']} programadas",
                      tone=EMERALD if (pct or 0) >= config.SURGERY_COMPLIANCE_MIN_PCT else AMBER),
             kpi_card("Ingresos", fmt_num(total_adm), f"{fmt_num(total_adm / span, 1)} por día", tone=BLUE),
@@ -86,7 +90,6 @@ def page_tablero() -> None:
 
     # --- 1.2 y 1.3 en sub-pestañas ---
     if beds:
-        # Selector en lugar de pestañas: st.tabs calcula TODAS las secciones en cada clic; así solo la visible.
         sections = {"Tendencias": lambda: _trends_section(start, end), "Capacidad y camas": lambda: _beds_section(end),
                     "Urgencias y espera": lambda: _emergency_section(start, end),
                     "Consumo de medicamentos": lambda: _consumption_section(start, end),
@@ -152,10 +155,9 @@ def _physical_trend(start_iso: str, end_iso: str) -> pd.DataFrame:
 
 
 def _trends_section(start, end) -> None:
-    """Las dos gráficas que pide el reto: evolución de la ocupación (línea) y distribución por servicio (pastel)."""
     left, right = st.columns([1.5, 1], gap="medium")
     with left:
-        span_start = min(start, end - timedelta(days=13))  # al menos dos semanas para ver la tendencia
+        span_start = min(start, end - timedelta(days=13))
         trend = _physical_trend(span_start.isoformat(), end.isoformat())
         by_service = st.toggle("Ver por servicio", key="trend_by_service")
         if by_service:
@@ -188,7 +190,6 @@ def _trends_section(start, end) -> None:
 
 
 def _consumption_section(start, end) -> None:
-    """Mayor y menor rotación de medicamentos e insumos en el periodo (dispensación real del HIS)."""
     kind = st.segmented_control("Tipo", ["Medicamento", "Insumo / dispositivo"], default="Medicamento",
                                 key="cons_kind") or "Medicamento"
     left, right = st.columns(2, gap="medium")
@@ -209,7 +210,6 @@ def _consumption_section(start, end) -> None:
 
 
 def _admissions_list(start, end) -> None:
-    """Listado de ingresos sin datos sensibles (sin nombre, documento, ni identificadores)."""
     lo, hi = db.day_bounds(start, end)
     df = pd.read_sql_query("""
         SELECT date(fecha_ingreso) AS fecha_ingreso, servicio, subgrupo_cama AS unidad, via_ingreso,
@@ -342,8 +342,9 @@ def page_asistente() -> None:
     # Siempre automático: si hay modelo de IA configurado responde él; si falla o no hay red, responde el respaldo
     # de consultas verificadas (Plan B). El usuario no tiene que elegir motor.
     agent.mode = "llm_first" if agent.llm else "rules"
-    banner("<b>Consultas de solo lectura</b> sobre la base analítica anonimizada (<code>mode=ro</code> + authorizer "
-           "SQLite). El asistente no tiene acceso a historias clínicas ni a prescripciones.", "ok")
+    banner("<b>Solo consulta:</b> el asistente lee la base analítica anonimizada y no puede modificar ningún dato. "
+           "No tiene acceso a historias clínicas ni a prescripciones. El detalle técnico de cada respuesta está en "
+           "«Trazabilidad».", "ok")
 
     labels = ["Camas UCI hoy", "Medicamentos < 5 días", "Espera urgencias (7 d)", "Servicio con más ingresos"]
     cols = st.columns(4)
@@ -362,7 +363,7 @@ def page_asistente() -> None:
     pending = st.session_state.pop("pending", None)
     if value is not None or pending:
         with st.spinner("Consultando…"):
-            result = chat.submit(value, pending)  # incluye la intención de ubicar camas y el análisis de archivos
+            result = chat.submit(value, pending)
         if result:
             history.append(result)
     with chat_box:

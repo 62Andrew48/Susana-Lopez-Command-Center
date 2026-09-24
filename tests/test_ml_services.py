@@ -96,7 +96,7 @@ KPI_URG = {"promedio_diario_28d_previos": 118.8, "cumplimiento_meta_triage2_pct_
 def test_interpret_speaks_plain_language_from_real_numbers():
     r = ft.interpret("urgencias", PRED_URG, KPI_URG)
     assert r.headline == "Se esperan unos 112 ingresos a urgencias el martes 22 de septiembre."
-    assert r.range_text == "Lo normal sería entre 63 y 162."
+    assert r.range_text == "Rango probable: entre 63 y 162."
     assert r.level == "Habitual" and "119" in r.level_text
     assert r.confidence == "Solo orientativo"
     assert any("mañana" in a and "42 %" in a for a in r.actions)      # 334 / 796
@@ -153,3 +153,68 @@ def test_executive_report_pdf_builds_and_has_no_patient_fields():
     assert pdf.startswith(b"%PDF")
     text = " ".join(pg.extract_text() for pg in PdfReader(io.BytesIO(pdf)).pages)
     assert "112" in text and "Datos no disponibles temporalmente" in text and "Plan de acción" in text
+
+
+# ---------------------------------------------------------------------------
+# Lectura para el administrador: periodo, cambio, por qué importa, qué revisar y resumen de 5 preguntas
+# ---------------------------------------------------------------------------
+PRED_QX = {"prediccion": 9.03, "intervalo": [1.0, 17.0], "fecha_objetivo": "2026-09-21", "horizonte_dias": 1,
+           "metricas": {"mae": 4.24, "mae_baseline": 4.75, "supera_baseline": True}}
+KPI_QX = {"promedio_por_dia_semana_8sem": [{"dia_semana": "lunes", "promedio_cirugias": 7.4}]}
+
+
+def test_reading_has_period_change_and_guidance():
+    r = ft.interpret("quirofanos", PRED_QX, KPI_QX)
+    assert r.period == "Lunes 21 de septiembre · próximo día"
+    assert r.level == "Alta" and r.change_text == "Aumento de 22 %" and r.reliable
+    assert r.why and r.resources and r.review
+    habitual = ft.interpret("urgencias", PRED_URG, KPI_URG)
+    assert habitual.change_text.startswith("Sin cambio importante") and not habitual.resources
+    assert "mantener la operación normal" in habitual.review[0]
+
+
+def test_guidance_uses_responsible_language_and_no_quantities():
+    """Nunca ordena comprar o contratar cantidades: solo sugiere revisar (el modelo no predice recursos)."""
+    for value in (150, 118, 80):
+        r = ft.interpret("urgencias", {**PRED_URG, "prediccion": value}, KPI_URG)
+        text = " ".join(r.review).lower()
+        assert not any(w in text for w in ("comprar", "contratar", "unidades de"))
+        assert all(any(k in x.lower() for k in ("revis", "verific", "confirm", "podría", "mantener", "no se"))
+                   for x in r.review)
+
+
+def test_unreliable_high_forecast_asks_to_confirm_first():
+    r = ft.interpret("urgencias", {**PRED_URG, "prediccion": 150}, KPI_URG)
+    assert r.level == "Alta" and not r.reliable
+    assert r.review[0].startswith("Pronóstico solo orientativo")
+    assert any("turno de la mañana" in x for x in r.review)   # turno con más ingresos (datos reales)
+
+
+def test_admin_summary_answers_the_five_questions():
+    readings = [("Urgencias", ft.interpret("urgencias", PRED_URG, KPI_URG)),
+                ("Quirófanos", ft.interpret("quirofanos", PRED_QX, KPI_QX)), ("Farmacia", None)]
+    s = ft.admin_summary(readings)
+    assert "Quirófanos (+22 %)" in s.what and s.tone == "danger"
+    assert s.when.startswith("Lunes 21 de septiembre y martes 22 de septiembre")
+    assert any("Farmacia: pronóstico no disponible" in c for c in s.changes)
+    assert s.resources and s.review
+
+
+def test_admin_summary_all_normal_says_nothing_extra():
+    s = ft.admin_summary([("Urgencias", ft.interpret("urgencias", PRED_URG, KPI_URG))])
+    assert s.tone == "ok" and "Ningún servicio" in s.what and not s.resources
+    assert "operación normal" in s.review[0]
+
+
+def test_executive_report_includes_admin_summary():
+    from openpyxl import load_workbook
+    readings = [("Quirófanos", ft.interpret("quirofanos", PRED_QX, KPI_QX))]
+    data = {"cutoff": "2026-09-21", "summary": "Resumen.", "recommendations": [], "situation": [], "purchases": [],
+            "shifts": [], "forecasts": [{"area": n, **r.__dict__} for n, r in readings],
+            "admin": ft.admin_summary(readings).__dict__}
+    cells = [c for row in load_workbook(io.BytesIO(reports.executive_report_xlsx(data)))["Resumen"]
+             .iter_rows(values_only=True) for c in row if c]
+    assert "Resumen para el administrador" in cells and "¿Qué debería revisar el administrador?" in cells
+    PdfReader = pytest.importorskip("pypdf").PdfReader
+    text = " ".join(pg.extract_text() for pg in PdfReader(io.BytesIO(reports.executive_report_pdf(data))).pages)
+    assert "Resumen para el administrador" in text and "Qué conviene revisar" in text

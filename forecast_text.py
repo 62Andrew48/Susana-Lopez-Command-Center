@@ -8,7 +8,12 @@ porcentajes de ocupación de quirófanos ni cantidades de insumos: si el dato no
                  del mismo día de la semana). ±15 % se considera habitual.
   * Confianza  : si el modelo mejoró o no a la referencia simple (repetir el mismo día de la semana anterior),
                  y de cuánto suele ser el error, en las unidades del servicio.
-  * Qué hacer  : 1-3 acciones apoyadas en los KPI reales del servicio.
+  * Datos      : 1-3 hechos de los KPI reales del servicio que respaldan la lectura (campo `actions`).
+  * Revisar    : qué recursos podrían verse afectados y qué conviene verificar. Es una lista de verificación
+                 administrativa redactada en condicional ("conviene revisar", "podría requerir"): nunca dice
+                 cuánto comprar ni a cuántas personas contratar, porque los modelos no predicen eso.
+  * Resumen    : admin_summary() responde las 5 preguntas del administrador (qué pasa, cuándo, qué cambia,
+                 qué recursos, qué revisar) a partir de las lecturas de todos los servicios.
 No depende de Streamlit.
 """
 from __future__ import annotations
@@ -30,14 +35,22 @@ ABOUT = {"quirofanos": "unas", "farmacia": "unas"}  # el resto es masculino: "un
 class Reading:
     code: str
     headline: str                 # "Se esperan unos 112 ingresos a urgencias el martes 22 de septiembre."
-    range_text: str               # "Lo normal sería entre 63 y 162."
+    range_text: str               # "Rango probable: entre 63 y 162."
     level: str                    # Alta | Habitual | Baja | Sin datos suficientes
     level_tone: str               # danger | ok | neutral | warn  (para chips)
     level_text: str               # "Similar a lo habitual (119 por día en las 4 semanas previas)."
     confidence: str               # Confiable | Solo orientativo
     confidence_tone: str
     confidence_text: str
-    actions: list[str] = field(default_factory=list)
+    actions: list[str] = field(default_factory=list)       # hechos de los datos recientes que respaldan la lectura
+    period: str = ""              # "Martes 22 de septiembre · 1 día después del último dato"
+    change_pct: float | None = None  # variación frente a lo habitual (+18.0 = 18 % más)
+    change_text: str = ""         # "Aumento de 18 % frente a lo habitual"
+    why: str = ""                 # por qué importa para la gestión del hospital
+    resources: list[str] = field(default_factory=list)  # recursos que podrían verse afectados
+    review: list[str] = field(default_factory=list)     # qué conviene revisar (lenguaje responsable)
+    reliable: bool = False        # True si el modelo superó a la referencia simple
+    target_date: str = ""         # fecha_objetivo ISO (para ordenar periodos)
 
 
 def num(v, decimals: int | None = None) -> str:
@@ -56,6 +69,90 @@ def day_text(iso: str | None) -> str:
     except (TypeError, ValueError):
         return "el próximo día"
     return f"el {DAYS[d.weekday()]} {d.day} de {MONTHS[d.month - 1]}"
+
+
+def period_text(iso: str | None, horizon: int | None = None) -> str:
+    """'Martes 22 de septiembre · próximo día' a partir de fecha_objetivo y horizonte_dias del servicio."""
+    try:
+        d = date.fromisoformat(str(iso)[:10])
+    except (TypeError, ValueError):
+        return "Próximo día"
+    when = f"{DAYS[d.weekday()].capitalize()} {d.day} de {MONTHS[d.month - 1]}"
+    if horizon and horizon > 1:
+        return f"{when} · {horizon} días hacia adelante"
+    return f"{when} · próximo día"
+
+
+def _change(value, usual) -> tuple[float | None, str]:
+    if value is None or not usual:
+        return None, "Sin punto de comparación"
+    pct = (value / usual - 1) * 100
+    if abs(pct) < BAND * 100:
+        return pct, f"Sin cambio importante ({'+' if pct >= 0 else '−'}{num(abs(pct), 0)} %)"
+    word = "Aumento" if pct > 0 else "Disminución"
+    return pct, f"{word} de {num(abs(pct), 0)} %"
+
+
+# Qué significa para la gestión y qué conviene revisar, por servicio y nivel. Es un listado de verificación
+# (lenguaje condicional), no una orden: los modelos predicen volumen de atención, no necesidades de compra.
+WHY = {
+    "urgencias": {
+        "Alta": "Más ingresos a urgencias suelen alargar la espera y presionar las camas de observación y de "
+                "hospitalización.",
+        "Habitual": "La demanda esperada está dentro de lo normal para el servicio.",
+        "Baja": "Se espera menos movimiento que de costumbre en urgencias.",
+    },
+    "quirofanos": {
+        "Alta": "Un día con más cirugías de lo normal exige salas, equipos quirúrgicos y camas de recuperación "
+                "disponibles a la vez.",
+        "Habitual": "La carga quirúrgica esperada está dentro de lo normal para ese día de la semana.",
+        "Baja": "Se esperan menos cirugías que en un día normal.",
+    },
+    "farmacia": {
+        "Alta": "Más entregas de medicamentos e insumos consumen existencias más rápido de lo habitual.",
+        "Habitual": "El movimiento esperado de farmacia está dentro de lo normal.",
+        "Baja": "Se espera menos movimiento de farmacia que de costumbre.",
+    },
+}
+RESOURCES = {
+    "urgencias": ["Personal médico y de enfermería de urgencias", "Camas de observación y de hospitalización",
+                  "Insumos de atención inicial (curaciones, líquidos, elementos de protección)"],
+    "quirofanos": ["Salas de cirugía y equipo quirúrgico (cirujanos, anestesia, instrumentación)",
+                   "Instrumental e insumos quirúrgicos", "Camas de recuperación y de cuidado intensivo"],
+    "farmacia": ["Existencias de medicamentos e insumos de mayor salida", "Personal de dispensación"],
+}
+REVIEW = {
+    "urgencias": ["Conviene revisar la cobertura de personal en el turno {turno}.",
+                  "Se recomienda verificar la disponibilidad de camas libres para hospitalizar.",
+                  "Conviene verificar las existencias de insumos de urgencias."],
+    "quirofanos": ["Se recomienda confirmar la programación del día con cada área quirúrgica.",
+                   "Conviene verificar la disponibilidad de camas de recuperación y UCI posquirúrgica.",
+                   "Conviene revisar instrumental e insumos quirúrgicos."],
+    "farmacia": ["Se recomienda revisar la orden de compra de los ítems urgentes (Alertas y acciones).",
+                 "Conviene verificar las existencias de los medicamentos de mayor salida."],
+}
+
+
+def _guidance(code: str, level: str, reliable: bool, k: dict) -> tuple[str, list[str], list[str]]:
+    """(por qué importa, recursos que podrían verse afectados, qué revisar) según el nivel del pronóstico."""
+    if level == "Sin datos suficientes":
+        return ("Los datos disponibles no alcanzan para anticipar la demanda de este servicio.", [],
+                ["No se recomienda tomar decisiones con este pronóstico hasta contar con más datos."])
+    why = WHY.get(code, {}).get(level, "")
+    if level == "Alta":
+        top = max(k.get("por_turno_7d") or [], key=lambda r: r.get("ingresos") or 0, default=None)
+        turno = f"de la {top['turno'].lower()}" if top else "de mayor demanda"
+        review = [r.format(turno=turno) for r in REVIEW.get(code, [])]
+        if not reliable:
+            review = ["Pronóstico solo orientativo: confirmar con el jefe del servicio antes de mover recursos.",
+                      *review[:2]]
+        return why, list(RESOURCES.get(code, [])), review
+    if level == "Baja":
+        return (why, [], ["Podría ser un buen momento para programar mantenimiento, capacitación o descansos; "
+                          "conviene confirmarlo con el jefe del servicio."])
+    if level == "Habitual":
+        return why, [], ["No se identifica una necesidad adicional: mantener la operación normal."]
+    return why, [], []
 
 
 def _level(value, usual, label_usual: str) -> tuple[str, str, str]:
@@ -142,12 +239,14 @@ def interpret(code: str, pred: dict, kpis: dict | None = None, urgent_items: int
     when = day_text(pred.get("fecha_objetivo"))
     headline = f"Se esperan {ABOUT.get(code, 'unos')} {num(value)} {unit} {when}."
     dec = 0 if value is not None and abs(value) >= 5 else 1
-    range_text = f"Lo normal sería entre {num(lo, dec)} y {num(hi, dec)}."
+    range_text = f"Rango probable: entre {num(lo, dec)} y {num(hi, dec)}."
     conf, conf_tone, conf_text = _confidence(pred, unit)
     actions: list[str] = []
+    usual = None
 
     if code == "urgencias":
-        level = _level(value, k.get("promedio_diario_28d_previos"), "por día en las 4 semanas previas")
+        usual = k.get("promedio_diario_28d_previos")
+        level = _level(value, usual, "por día en las 4 semanas previas")
         actions = _actions_urgencias(k)
     elif code == "quirofanos":
         usual = None
@@ -155,13 +254,15 @@ def interpret(code: str, pred: dict, kpis: dict | None = None, urgent_items: int
             dname = DAYS[date.fromisoformat(pred["fecha_objetivo"]).weekday()]
             usual = next((r["promedio_cirugias"] for r in k.get("promedio_por_dia_semana_8sem") or []
                           if r.get("dia_semana") == dname), None)
-            label = f"un {dname} normal"
+            label = f"en un {dname} normal"
         except (KeyError, TypeError, ValueError):
             label = "por día"
-        level = _level(value, usual or k.get("promedio_diario_28d_previos"), label)
+        usual = usual or k.get("promedio_diario_28d_previos")
+        level = _level(value, usual, label)
         actions = _actions_quirofanos(k)
     elif code == "farmacia":
-        level = _level(value, k.get("promedio_diario_dispensaciones_28d_previos"), "por día en las 4 semanas previas")
+        usual = k.get("promedio_diario_dispensaciones_28d_previos")
+        level = _level(value, usual, "por día en las 4 semanas previas")
         actions = _actions_farmacia(k, urgent_items)
     elif code == "consultas":
         share = k.get("participacion_ambulatoria_28d_pct")
@@ -172,8 +273,75 @@ def interpret(code: str, pred: dict, kpis: dict | None = None, urgent_items: int
             actions = ["El extracto no trae citas agendadas ni inasistencias, así que este pronóstico no sirve "
                        "todavía para planear la consulta externa."]
         else:
-            level = _level(value, k.get("promedio_diario_28d_previos"), "por día en las 4 semanas previas")
+            usual = k.get("promedio_diario_28d_previos")
+            level = _level(value, usual, "por día en las 4 semanas previas")
     else:
         level = ("Sin referencia", "neutral", "")
 
-    return Reading(code, headline, range_text, *level, conf, conf_tone, conf_text, actions)
+    reliable = bool((pred.get("metricas") or {}).get("supera_baseline"))
+    change_pct, change_text = _change(value, usual) if level[0] != "Sin datos suficientes" else (None, "")
+    why, resources, review = _guidance(code, level[0], reliable, k)
+    return Reading(code, headline, range_text, *level, conf, conf_tone, conf_text, actions,
+                   period=period_text(pred.get("fecha_objetivo"), pred.get("horizonte_dias")),
+                   change_pct=change_pct, change_text=change_text, why=why, resources=resources, review=review,
+                   reliable=reliable, target_date=str(pred.get("fecha_objetivo") or "")[:10])
+
+
+# ---------------------------------------------------------------------------
+# Resumen para el administrador (las 5 preguntas)
+# ---------------------------------------------------------------------------
+@dataclass
+class AdminSummary:
+    what: str                 # ¿Qué está ocurriendo?
+    when: str                 # ¿En qué periodo?
+    changes: list[str]        # ¿Qué cambio se espera? (una línea por servicio)
+    resources: list[str]      # ¿Qué recursos podrían verse afectados?
+    review: list[str]         # ¿Qué debería revisar el administrador?
+    tone: str                 # danger | warn | ok (para el color del bloque)
+
+
+def admin_summary(readings: list[tuple[str, Reading | None]]) -> AdminSummary:
+    """readings = [(nombre del área, lectura o None si el servicio no respondió)]. Solo usa lo que hay."""
+    ok = [(n, r) for n, r in readings if r is not None]
+    down = [n for n, r in readings if r is None]
+    high = [(n, r) for n, r in ok if r.level == "Alta"]
+    low = [(n, r) for n, r in ok if r.level == "Baja"]
+    nodata = [n for n, r in ok if r.level == "Sin datos suficientes"]
+
+    if not ok:
+        return AdminSummary("No hay pronósticos disponibles en este momento.", "—", [], [],
+                            ["Verificar que los servicios de pronóstico estén encendidos y volver a actualizar."],
+                            "warn")
+    if high:
+        names = ", ".join(f"{n} ({'+' if (r.change_pct or 0) >= 0 else ''}{num(r.change_pct, 0)} %)" for n, r in high)
+        what = f"Se espera más demanda de lo habitual en {names}."
+        tone = "danger" if any(r.reliable for _, r in high) else "warn"
+    else:
+        what = "Ningún servicio muestra una demanda por encima de lo habitual."
+        tone = "ok"
+    if low:
+        what += " Menos movimiento de lo normal en " + ", ".join(n for n, _ in low) + "."
+
+    dated = sorted((r.target_date, r.period.split(" · ")[0]) for _, r in ok if r.period)
+    periods = list(dict.fromkeys(p for _, p in dated))
+    periods = periods[:1] + [p[0].lower() + p[1:] for p in periods[1:]]
+    when = (" y ".join(periods) if periods else "Próximo día") + " (el día siguiente al último dato de cada servicio)"
+
+    changes = []
+    for n, r in ok:
+        if r.level == "Sin datos suficientes":
+            changes.append(f"{n}: datos insuficientes para anticipar la demanda.")
+        else:
+            changes.append(f"{n}: {(r.change_text or r.level).lower()} frente a lo habitual"
+                           f"{'' if r.reliable else ' · solo orientativo'}.")
+    changes += [f"{n}: pronóstico no disponible en este momento." for n in down]
+
+    resources = list(dict.fromkeys(x for _, r in high for x in r.resources))
+    review: list[str] = []
+    for _, r in sorted(high, key=lambda nr: not nr[1].reliable):
+        review += [x for x in r.review if x not in review]
+    if not review:
+        review = ["No se identifican necesidades adicionales para el próximo día: mantener la operación normal."]
+    if nodata:
+        review.append(f"{', '.join(nodata)}: no usar el pronóstico para planear (datos insuficientes).")
+    return AdminSummary(what, when, changes, resources, review[:4], tone)

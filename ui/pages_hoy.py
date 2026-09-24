@@ -20,7 +20,7 @@ import pharmacy_service as ps
 from agent import fmt_minutes, fmt_num
 from ui import context as ctx
 from ui.glossary import tip
-from ui.theme import AMBER, BLUE, BORDER, EMERALD, MUTED, RED, TEXT, esc, occupancy_color
+from ui.theme import AMBER, BLUE, EMERALD, MUTED, RED, esc, occupancy_color
 
 FMT = "%Y-%m-%d %H:%M:%S"
 DAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
@@ -28,48 +28,48 @@ MONTHS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agost
           "noviembre", "diciembre"]
 # Colores de triage (Resolución 5596 de 2015): I rojo, II naranja, III amarillo, IV verde, V azul
 TRIAGE_COLOR = {1: "#DC2626", 2: "#EA580C", 3: "#CA8A04", 4: "#16A34A", 5: "#2563EB"}
-TRIAGE_BG = {1: "#FEE2E2", 2: "#FFEDD5", 3: "#FEF9C3", 4: "#DCFCE7", 5: "#DBEAFE"}
+TRIAGE_TONE = {1: "danger", 2: "orange", 3: "warn", 4: "ok", 5: "info"}  # clases de theme.py (claro y oscuro)
 ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V"}
 
-CSS = f"""
+CSS = """
 <style>
-  .today-head {{display:flex; justify-content:space-between; align-items:flex-end; gap:1rem; flex-wrap:wrap;
-      margin: 0.2rem 0 0.9rem;}}
-  .today-head h2 {{font-size:1.5rem; font-weight:700; color:{TEXT}; margin:0; padding:0;}}
-  .today-head p {{margin:0.15rem 0 0; color:{MUTED}; font-size:0.9rem;}}
-  .stat-grid {{display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:0.9rem; margin-bottom:1.1rem;}}
-  .stat {{background:#FFF; border:1px solid {BORDER}; border-left:4px solid var(--c); border-radius:12px;
-      box-shadow:0 1px 3px rgba(0,0,0,.05); padding:0.95rem 1.05rem; display:flex; flex-direction:column;
-      gap:0.3rem; min-height:150px;}}
-  .stat-top {{display:flex; justify-content:space-between; align-items:center;}}
-  .stat-icon {{width:2.1rem; height:2.1rem; border-radius:8px; display:flex; align-items:center;
-      justify-content:center; font-size:1.05rem; background:var(--bg);}}
-  .stat-delta {{font-size:0.7rem; font-weight:700; border-radius:999px; padding:0.12rem 0.5rem;}}
-  .stat-label {{font-size:0.82rem; color:{MUTED}; font-weight:600; margin-top:0.2rem;}}
-  .stat-value {{font-size:1.75rem; font-weight:750; color:{TEXT}; line-height:1.1; font-variant-numeric:tabular-nums;}}
-  .stat-value small {{font-size:0.85rem; font-weight:500; color:{MUTED}; margin-left:0.25rem;}}
-  .stat-bar {{display:flex; height:6px; border-radius:999px; overflow:hidden; background:#F1F5F9; margin-top:auto;}}
-  .stat-bar span {{display:block; height:100%;}}
-  .stat-foot {{font-size:0.68rem; color:{MUTED}; text-transform:uppercase; letter-spacing:0.03em;}}
-  .q-row {{display:flex; align-items:center; gap:0.7rem; background:#FFF; border:1px solid {BORDER};
-      border-radius:10px; padding:0.55rem 0.75rem; margin-bottom:0.45rem;}}
-  .q-av {{width:2rem; height:2rem; border-radius:50%; background:#F1F5F9; display:flex; align-items:center;
-      justify-content:center; font-size:0.95rem; flex:none;}}
-  .q-main {{flex:1; min-width:0;}}
-  .q-code {{font-size:0.85rem; font-weight:700; color:{TEXT};}}
-  .q-tag {{font-size:0.66rem; font-weight:700; border-radius:5px; padding:0.05rem 0.4rem; margin-left:0.35rem;}}
-  .q-sub {{font-size:0.75rem; color:{MUTED}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}}
-  .q-wait {{text-align:right; flex:none;}}
-  .q-wait small {{display:block; font-size:0.66rem; color:{MUTED};}}
-  .q-wait b {{font-size:0.95rem; font-variant-numeric:tabular-nums;}}
-  .bed-sug {{font-size:0.82rem; color:{TEXT}; background:#ECFDF5; border:1px solid #A7F3D0; border-radius:8px;
-      padding:0.4rem 0.6rem; margin-top:0.35rem;}}
-  .todo {{background:#FFF; border:1px solid {BORDER}; border-radius:10px; padding:0.75rem 0.9rem; height:100%;}}
-  .todo-n {{font-size:1.6rem; font-weight:750; color:{TEXT}; font-variant-numeric:tabular-nums;}}
-  .todo-t {{font-size:0.84rem; color:#374151; font-weight:600;}}
-  .todo-s {{font-size:0.75rem; color:{MUTED};}}
-  @media (max-width: 1150px) {{ .stat-grid {{grid-template-columns:repeat(2, minmax(0,1fr));}} }}
-  @media (max-width: 560px)  {{ .stat-grid {{grid-template-columns:1fr;}} .stat {{min-height:0;}} }}
+  .today-head {display:flex; justify-content:space-between; align-items:flex-end; gap:1rem; flex-wrap:wrap;
+      margin: 0.2rem 0 0.9rem;}
+  .today-head h2 {font-size:1.5rem; font-weight:700; color:var(--text); margin:0; padding:0;}
+  .today-head p {margin:0.15rem 0 0; color:var(--muted); font-size:0.9rem;}
+  .stat-grid {display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:0.9rem; margin-bottom:1.1rem;}
+  .stat {background:var(--surface); border:1px solid var(--border); border-left:4px solid var(--c); border-radius:12px;
+      box-shadow:var(--shadow); padding:0.95rem 1.05rem; display:flex; flex-direction:column;
+      gap:0.3rem; min-height:150px;}
+  .stat-top {display:flex; justify-content:space-between; align-items:center;}
+  .stat-icon {width:2.1rem; height:2.1rem; border-radius:8px; display:flex; align-items:center;
+      justify-content:center; font-size:1.05rem; background:var(--bg);}
+  .stat-delta {font-size:0.7rem; font-weight:700; border-radius:999px; padding:0.12rem 0.5rem;}
+  .stat-label {font-size:0.82rem; color:var(--muted); font-weight:600; margin-top:0.2rem;}
+  .stat-value {font-size:1.75rem; font-weight:750; color:var(--text); line-height:1.1; font-variant-numeric:tabular-nums;}
+  .stat-value small {font-size:0.85rem; font-weight:500; color:var(--muted); margin-left:0.25rem;}
+  .stat-bar {display:flex; height:6px; border-radius:999px; overflow:hidden; background:var(--surface-2); margin-top:auto;}
+  .stat-bar span {display:block; height:100%;}
+  .stat-foot {font-size:0.68rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.03em;}
+  .q-row {display:flex; align-items:center; gap:0.7rem; background:var(--surface); border:1px solid var(--border);
+      border-radius:10px; padding:0.55rem 0.75rem; margin-bottom:0.45rem;}
+  .q-av {width:2rem; height:2rem; border-radius:50%; background:var(--surface-2); display:flex; align-items:center;
+      justify-content:center; font-size:0.95rem; flex:none;}
+  .q-main {flex:1; min-width:0;}
+  .q-code {font-size:0.85rem; font-weight:700; color:var(--text);}
+  .q-tag {font-size:0.66rem; font-weight:700; border-radius:5px; padding:0.05rem 0.4rem; margin-left:0.35rem;}
+  .q-sub {font-size:0.75rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .q-wait {text-align:right; flex:none;}
+  .q-wait small {display:block; font-size:0.66rem; color:var(--muted);}
+  .q-wait b {font-size:0.95rem; font-variant-numeric:tabular-nums;}
+  .bed-sug {font-size:0.82rem; color:var(--text); background:var(--ok-bg); border:1px solid var(--ok-bd); border-radius:8px;
+      padding:0.4rem 0.6rem; margin-top:0.35rem;}
+  .todo {background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:0.75rem 0.9rem; height:100%;}
+  .todo-n {font-size:1.6rem; font-weight:750; color:var(--text); font-variant-numeric:tabular-nums;}
+  .todo-t {font-size:0.84rem; color:var(--text-2); font-weight:600;}
+  .todo-s {font-size:0.75rem; color:var(--muted);}
+  @media (max-width: 1150px) { .stat-grid {grid-template-columns:repeat(2, minmax(0,1fr));} }
+  @media (max-width: 560px)  { .stat-grid {grid-template-columns:1fr;} .stat {min-height:0;} }
 </style>
 """
 
@@ -95,8 +95,7 @@ def _stat(label: str, value: str, unit: str, icon: str, color: str, bg: str, bar
           delta: str | None = None, delta_good: bool = True) -> str:
     delta_html = ""
     if delta:
-        fg, dbg = ("#065F46", "#D1FAE5") if delta_good else ("#991B1B", "#FEE2E2")
-        delta_html = f'<span class="stat-delta" style="color:{fg};background:{dbg}">{esc(delta)}</span>'
+        delta_html = f'<span class="stat-delta t-{"ok" if delta_good else "danger"}">{esc(delta)}</span>'
     return (f'<div class="stat" style="--c:{color};--bg:{bg}"><div class="stat-top">'
             f'<div class="stat-label" style="margin:0">{esc(label)}</div>{delta_html}</div>'
             f'<div class="stat-value">{esc(value)}<small>{esc(unit)}</small></div>'
@@ -218,7 +217,8 @@ def _do_now(user: dict, alerts) -> None:
         with st.container(border=True):
             text, btn = st.columns([3.5, 1.5], vertical_alignment="center")
             title = re.sub(r"\s*\(.*?\)", "", n.title)
-            text.markdown(f'<span style="color:{SEV_COLOR.get(n.severity, MUTED)}">●</span> <b>{esc(title)}</b>'
+            text.markdown(f'<span class="dot" style="color:{SEV_COLOR.get(n.severity, MUTED)}" '
+                          f'title="Prioridad {esc(n.severity)}"></span> <b>{esc(title)}</b>'
                           f'<br><span class="muted">{esc(hint)}</span>', unsafe_allow_html=True)
             if n.slug in ctx.PAGES:
                 btn.page_link(ctx.PAGES[n.slug], label=n.link_label)
@@ -232,13 +232,13 @@ def _queue_panel(queue, now: datetime) -> None:
     rows = []
     for r in queue.head(5).itertuples():
         lvl = int(r.nivel_triage) if pd.notna(r.nivel_triage) else None
-        color, bg = TRIAGE_COLOR.get(lvl, MUTED), TRIAGE_BG.get(lvl, "#F3F4F6")
+        tone = TRIAGE_TONE.get(lvl, "neutral")
         tag = tip(f"Triage {ROMAN[lvl]}" if lvl in (1, 2) else "triage", f"Triage {ROMAN[lvl]}") if lvl else "Sin triage"
         wait_color = RED if r.fuera_de_meta else (AMBER if r.espera_min >= 30 else EMERALD)
         area = str(r.area).split(" Consultorio")[0]
         rows.append(
             f'<div class="q-row"><div class="q-main"><span class="q-code">{esc(r.codigo)}</span>'
-            f'<span class="q-tag" style="color:{color};background:{bg}">{tag}</span>'
+            f'<span class="q-tag t-{tone}">{tag}</span>'
             f'<div class="q-sub">{esc(area)} · llegó {esc(r.llegada)}</div></div>'
             f'<div class="q-wait"><b style="color:{wait_color}">{fmt_minutes(r.espera_min)}</b></div></div>')
     st.markdown("".join(rows), unsafe_allow_html=True)

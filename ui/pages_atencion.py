@@ -20,25 +20,25 @@ import config
 import requests_service as rq
 import scheduling as sch
 from ui import context as ctx
-from ui.theme import BORDER, MUTED, TEXT, banner, chip, esc, section_title
+from ui.theme import MUTED, TEXT, banner, chip, esc, section_title
 
 DAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 STATE = {"PROGRAMADA": ("Programada", "info"), "CUMPLIDA": ("Atendida", "ok"), "NO_ASISTIO": ("No asistió", "danger"),
          "CANCELADA": ("Cancelada", "neutral")}
 TICKET_STATE = {"EN_ESPERA": "En espera", "LLAMADO": "Llamado", "EN_ATENCION": "En atención", "ATENDIDO": "Atendido",
                 "NO_SE_PRESENTO": "No se presentó"}
-CSS = f"""
+CSS = """
 <style>
-  .tk {{background:#FFF; border:1px solid {BORDER}; border-radius:14px; padding:0.9rem 1.1rem; margin-bottom:0.6rem;
-      display:flex; align-items:center; gap:1.1rem;}}
-  .tk-code {{font-size:2.3rem; font-weight:800; color:#2E3378; letter-spacing:.04em; font-variant-numeric:tabular-nums;}}
-  .tk.called {{border:2px solid #507643; background:#F0F7EC;}}
-  .tk small {{color:{MUTED};}}
-  .board {{display:grid; grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); gap:0.6rem;}}
-  .board .cell {{background:#FFF; border:1px solid {BORDER}; border-radius:12px; padding:0.6rem 0.8rem;}}
-  .board .cell.called {{background:#2E3378; color:#FFF; border-color:#2E3378;}}
-  .board .cell b {{font-size:1.6rem; display:block;}}
-  .board .cell span {{font-size:0.8rem;}}
+  .tk {background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:0.9rem 1.1rem; margin-bottom:0.6rem;
+      display:flex; align-items:center; gap:1.1rem;}
+  .tk-code {font-size:2.3rem; font-weight:800; color:var(--brand); letter-spacing:.04em; font-variant-numeric:tabular-nums;}
+  .tk.called {border:2px solid var(--brand-green); background:var(--brand-tint);}
+  .tk small {color:var(--muted);}
+  .board {display:grid; grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); gap:0.6rem;}
+  .board .cell {background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:0.6rem 0.8rem;}
+  .board .cell.called {background:#2E3378; color:#FFF; border-color:#2E3378;}
+  .board .cell b {font-size:1.6rem; display:block;}
+  .board .cell span {font-size:0.8rem;}
 </style>
 """
 

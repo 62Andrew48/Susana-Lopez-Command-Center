@@ -21,22 +21,22 @@ import config
 import hc_documents as hd
 import pharmacy_service as ps
 from ui import context as ctx
-from ui.theme import BORDER, EVENT_STYLE, GREY, MUTED, RX_LABEL, TEXT, banner, chip, esc, section_title
+from ui.theme import EVENT_STYLE, GREY, MUTED, RX_LABEL, banner, chip, esc, section_title
 
 FMT_IN = "%Y-%m-%d %H:%M:%S"
-CSS = f"""
+CSS = """
 <style>
-  .hc-rec {{background:#FFF; border:1px solid {BORDER}; border-left:4px solid var(--c); border-radius:10px;
-      padding:0.75rem 0.9rem; margin-bottom:0.35rem;}}
-  .hc-rec h4 {{margin:0 0 0.15rem; font-size:1rem; color:{TEXT};}}
-  .hc-meta {{font-size:0.78rem; color:{MUTED}; margin-bottom:0.4rem;}}
-  .hc-body {{font-size:0.9rem; color:{TEXT}; white-space:pre-wrap;}}
-  .hc-body b {{color:{TEXT};}}
-  .hc-annulled {{opacity:0.6;}}
-  .hc-annulled .hc-body {{text-decoration:line-through;}}
-  .hc-pt {{background:#FFF; border:1px solid {BORDER}; border-radius:12px; padding:0.7rem 0.9rem;
-      margin-bottom:0.6rem;}}
-  .hc-pt b {{font-size:1.05rem;}}
+  .hc-rec {background:var(--surface); border:1px solid var(--border); border-left:4px solid var(--c); border-radius:10px;
+      padding:0.75rem 0.9rem; margin-bottom:0.35rem;}
+  .hc-rec h4 {margin:0 0 0.15rem; font-size:1rem; color:var(--text);}
+  .hc-meta {font-size:0.78rem; color:var(--muted); margin-bottom:0.4rem;}
+  .hc-body {font-size:0.9rem; color:var(--text); white-space:pre-wrap;}
+  .hc-body b {color:var(--text);}
+  .hc-annulled {opacity:0.6;}
+  .hc-annulled .hc-body {text-decoration:line-through;}
+  .hc-pt {background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:0.7rem 0.9rem;
+      margin-bottom:0.6rem;}
+  .hc-pt b {font-size:1.05rem;}
 </style>
 """
 
@@ -599,17 +599,17 @@ def search_tab() -> None:
 # ===========================================================================
 # Ficha del paciente (todo en un vistazo), descargas y exportación
 # ===========================================================================
-SUMMARY_CSS = f"""
+SUMMARY_CSS = """
 <style>
-  .fx-allergy {{border-radius:10px; padding:0.55rem 0.8rem; margin:0.2rem 0 0.6rem; font-size:0.92rem;}}
-  .fx-allergy.bad {{background:#FEE2E2; color:#991B1B; border:1px solid #FCA5A5;}}
-  .fx-allergy.ok {{background:#ECFDF5; color:#065F46; border:1px solid #A7F3D0;}}
-  .fx-allergy.unk {{background:#FEF3C7; color:#92400E; border:1px solid #FCD34D;}}
-  .fx-grid {{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:0.55rem; margin-bottom:0.6rem;}}
-  .fx-box {{background:#FFF; border:1px solid {BORDER}; border-radius:10px; padding:0.55rem 0.7rem;}}
-  .fx-box h5 {{margin:0 0 0.2rem; font-size:0.75rem; color:{MUTED}; font-weight:650; text-transform:uppercase;
-      letter-spacing:.03em;}}
-  .fx-box div {{font-size:0.88rem; color:{TEXT}; white-space:pre-wrap;}}
+  .fx-allergy {border-radius:10px; padding:0.55rem 0.8rem; margin:0.2rem 0 0.6rem; font-size:0.92rem;}
+  .fx-allergy.bad {background:var(--danger-bg); color:var(--danger-fg); border:1px solid var(--danger-bd);}
+  .fx-allergy.ok {background:var(--ok-bg); color:var(--ok-fg); border:1px solid var(--ok-bd);}
+  .fx-allergy.unk {background:var(--warn-bg); color:var(--warn-fg); border:1px solid var(--warn-bd);}
+  .fx-grid {display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:0.55rem; margin-bottom:0.6rem;}
+  .fx-box {background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:0.55rem 0.7rem;}
+  .fx-box h5 {margin:0 0 0.2rem; font-size:0.75rem; color:var(--muted); font-weight:650; text-transform:uppercase;
+      letter-spacing:.03em;}
+  .fx-box div {font-size:0.88rem; color:var(--text); white-space:pre-wrap;}
 </style>
 """
 

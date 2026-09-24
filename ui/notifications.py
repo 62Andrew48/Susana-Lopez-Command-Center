@@ -371,8 +371,9 @@ def render_bell(container) -> None:
             st.caption("No tienes notificaciones. Todo al día.")
         for i, n in enumerate(items[:12]):
             faded = "opacity:.55;" if n.id in read else ""
-            st.markdown(f'<div style="{faded}border-top:1px solid #E5E7EB;padding:0.45rem 0 0.2rem;">'
-                        f'<span style="color:{DOT.get(n.severity, "#9CA3AF")}">●</span> <b>{esc(n.title)}</b><br>'
+            st.markdown(f'<div style="{faded}border-top:1px solid var(--border);padding:0.45rem 0 0.2rem;">'
+                        f'<span class="dot" style="color:{DOT.get(n.severity, "#9CA3AF")}" '
+                        f'title="Prioridad {esc(n.severity)}"></span> <b>{esc(n.title)}</b><br>'
                         f'<span class="muted">{esc(n.detail)}</span></div>', unsafe_allow_html=True)
             if n.slug and n.slug in ctx.PAGES:
                 st.page_link(ctx.PAGES[n.slug], label=f"{n.link_label} →")

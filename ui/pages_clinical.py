@@ -301,7 +301,7 @@ def page_portal() -> None:
         banner(f"{esc(decision.reason)}", "danger")
         return
     clin = ctx.get_clin()
-    st.markdown(f'<div class="brand"><h1 style="color:#111827">Hola, {esc(user["nombre_mostrado"])}</h1></div>',
+    st.markdown(f'<div class="brand"><h1 style="color:var(--text)">Hola, {esc(user["nombre_mostrado"])}</h1></div>',
                 unsafe_allow_html=True)
     st.caption("Aquí solo ves tu propia información. Ningún otro paciente puede verla.")
     pa.patient_ticket_banner(id_paciente)

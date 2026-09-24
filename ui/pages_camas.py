@@ -17,26 +17,26 @@ import clinical_records as cr
 import database as db
 from agent import fmt_num
 from ui import context as ctx
-from ui.theme import AMBER, BORDER, EMERALD, MUTED, TEXT, chip, esc
+from ui.theme import AMBER, EMERALD, chip, esc
 
 SHORT_STAY_DAYS, LONG_STAY_DAYS = 10, 15
 CRITICAL_WORDS = ("INTENSIV", "INTERMEDIO", "BASICO NEONATAL", "CUIDAD BASICO")
 
 CSS = f"""
 <style>
-  .map-legend {{display:flex; gap:1rem; flex-wrap:wrap; font-size:0.78rem; color:{MUTED}; margin:0.2rem 0 0.8rem;}}
+  .map-legend {{display:flex; gap:1rem; flex-wrap:wrap; font-size:0.78rem; color:var(--muted); margin:0.2rem 0 0.8rem;}}
   .map-legend span {{display:inline-flex; align-items:center; gap:0.35rem;}}
   .sw {{width:0.85rem; height:0.85rem; border-radius:3px; display:inline-block;}}
   .unit-head {{display:flex; align-items:center; justify-content:space-between; gap:0.6rem; flex-wrap:wrap;
       margin:0.9rem 0 0.5rem;}}
-  .unit-head b {{font-size:1rem; color:{TEXT};}}
+  .unit-head b {{font-size:1rem; color:var(--text);}}
   .rooms {{display:grid; grid-template-columns:repeat(auto-fill, minmax(118px, 1fr)); gap:0.55rem;}}
-  .room {{background:#FFF; border:1px solid {BORDER}; border-radius:10px; padding:0.5rem 0.55rem;
-      box-shadow:0 1px 2px rgba(0,0,0,.04);}}
-  .room.has-free {{border-color:#6EE7B7; box-shadow:0 0 0 1px #A7F3D0;}}
+  .room {{background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:0.5rem 0.55rem;
+      box-shadow:var(--shadow);}}
+  .room.has-free {{border-color:var(--ok-bd); box-shadow:0 0 0 1px var(--ok-bd);}}
   .room-h {{display:flex; justify-content:space-between; align-items:baseline; font-size:0.78rem;
-      color:{MUTED}; margin-bottom:0.35rem;}}
-  .room-h b {{color:{TEXT}; font-size:0.86rem;}}
+      color:var(--muted); margin-bottom:0.35rem;}}
+  .room-h b {{color:var(--text); font-size:0.86rem;}}
   .beds {{display:flex; gap:0.3rem; flex-wrap:wrap;}}
   .bed {{min-width:1.9rem; height:1.9rem; padding:0 0.3rem; border-radius:6px; display:inline-flex;
       align-items:center; justify-content:center; font-size:0.74rem; font-weight:700; color:#FFF;
@@ -45,12 +45,12 @@ CSS = f"""
   .bed.busy {{background:#EF4444;}}
   .bed.mid {{background:#EA580C;}}
   .bed.long {{background:#7F1D1D; outline:2px dashed {AMBER}; outline-offset:1px;}}
-  .unit-beds {{display:flex; gap:0.35rem; flex-wrap:wrap; background:#FFF; border:1px solid {BORDER};
+  .unit-beds {{display:flex; gap:0.35rem; flex-wrap:wrap; background:var(--surface); border:1px solid var(--border);
       border-radius:10px; padding:0.6rem;}}
   .unit-beds .bed {{min-width:3.4rem;}}
-  .expansion {{font-size:0.78rem; color:{MUTED}; margin-top:0.35rem;}}
+  .expansion {{font-size:0.78rem; color:var(--muted); margin-top:0.35rem;}}
   .found {{display:flex; flex-wrap:wrap; gap:0.45rem; margin:0.3rem 0 0.2rem;}}
-  .found span {{background:#ECFDF5; border:1px solid #A7F3D0; color:#065F46; border-radius:8px;
+  .found span {{background:var(--ok-bg); border:1px solid var(--ok-bd); color:var(--ok-fg); border-radius:8px;
       padding:0.35rem 0.6rem; font-size:0.84rem; font-weight:600;}}
 </style>
 """

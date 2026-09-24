@@ -28,42 +28,53 @@ import voice
 from ui import context as ctx
 from ui.session import LOGO_ICON
 from ui import assistant_scope as scope_mod
-from ui.theme import BLUE, BORDER, MUTED, TEXT, esc, severity_pill
+from ui.theme import esc, severity_pill
 
 PANEL_H = 430            # alto del hilo de mensajes (px)
 SHORT = ["Camas UCI hoy", "Medicamentos < 5 días", "Espera urgencias", "Servicio con más ingresos",
          "¿Dónde hay camas libres para adultos?"]
 
-CSS = f"""
+CSS = """
 <style>
-  .st-key-ia_fab {{position:fixed; right:24px; bottom:24px; z-index:1000; width:auto !important;}}
-  .st-key-ia_fab button {{border-radius:999px !important; padding:0.65rem 1.15rem !important; border:none !important;
-      background:linear-gradient(135deg, {BLUE}, #059669) !important; color:#FFF !important; font-weight:700 !important;
-      box-shadow:0 8px 24px rgba(31,78,121,.35) !important;}}
-  .st-key-ia_fab button p {{color:#FFF !important; font-size:0.95rem !important;}}
-  .st-key-ia_panel {{position:fixed; right:24px; bottom:88px; z-index:1000; width:410px; max-width:calc(100vw - 32px);
-      background:#FFF; border:1px solid {BORDER}; border-radius:16px; box-shadow:0 18px 50px rgba(15,23,42,.22);
-      padding:0.8rem 0.9rem 0.6rem;}}
-  .ia-head {{display:flex; align-items:center; gap:0.6rem; padding-bottom:0.5rem; border-bottom:1px solid {BORDER};}}
-  .ia-logo {{width:2.2rem; height:2.2rem; border-radius:50%; display:flex; align-items:center; justify-content:center;
-      background:linear-gradient(135deg, {BLUE}, #059669); color:#FFF; font-weight:800; font-size:0.85rem; flex:none;}}
-  .ia-head b {{color:{TEXT}; font-size:0.95rem;}}
-  .ia-head small {{display:block; color:{MUTED}; font-size:0.72rem;}}
-  .ia-me, .ia-bot {{font-size:0.84rem; line-height:1.45; border-radius:12px; padding:0.5rem 0.7rem; margin:0.35rem 0;
-      max-width:92%;}}
-  .ia-me {{background:{BLUE}; color:#FFF; margin-left:auto; border-bottom-right-radius:4px;}}
-  .ia-meta {{font-size:0.68rem; color:{MUTED}; margin:-0.15rem 0 0.25rem;}}
-  .ia-beds {{display:flex; flex-wrap:wrap; gap:0.3rem; margin-top:0.35rem;}}
-  .ia-beds span {{background:#ECFDF5; border:1px solid #A7F3D0; color:#065F46; border-radius:7px;
-      padding:0.15rem 0.45rem; font-size:0.75rem; font-weight:600;}}
-  .st-key-ia_panel [data-testid="stChatMessage"] {{padding:0.3rem 0.4rem; background:#F8FAFC;}}
-  .st-key-ia_panel [data-testid="stChatMessage"] p {{font-size:0.84rem;}}
-  .st-key-ia_panel .stButton button {{font-size:0.78rem; padding:0.2rem 0.5rem; min-height:0;}}
-  @media (max-width: 640px) {{
-    .st-key-ia_panel {{right:8px; left:8px; bottom:78px; width:auto;}}
-    .st-key-ia_fab {{right:14px; bottom:14px;}}
-    .st-key-ia_close {{display:none;}}   /* en celular se cierra con el botón flotante */
-  }}
+  .st-key-ia_fab {position:fixed; right:24px; bottom:24px; z-index:1000; width:auto !important;}
+  .stApp .st-key-ia_fab button {border-radius:999px !important; padding:0.65rem 1.15rem !important; min-height:44px;
+      border:1px solid transparent !important; background:var(--chat-me) !important; color:#FFF !important;
+      font-weight:700 !important; box-shadow:0 8px 24px rgba(15,23,42,.30) !important;}
+  .stApp .st-key-ia_fab button:hover {filter:brightness(1.15); border-color:transparent !important;
+      background:var(--chat-me) !important;}
+  .stApp .st-key-ia_fab button p, .stApp .st-key-ia_fab button span {color:#FFF !important; font-size:0.95rem !important;}
+  .st-key-ia_panel {position:fixed; right:24px; bottom:88px; z-index:1000; width:410px; max-width:calc(100vw - 32px);
+      max-height:calc(100vh - 110px); overflow:auto;
+      background:var(--surface); border:1px solid var(--border); border-radius:16px; box-shadow:var(--shadow-lg);
+      padding:0.8rem 0.9rem 0.6rem;}
+  .ia-head {display:flex; align-items:center; gap:0.6rem; min-height:2.5rem;}
+  .ia-head b {color:var(--text); font-size:0.95rem;}
+  .ia-head small {display:block; color:var(--muted); font-size:0.72rem;}
+  .st-key-ia_header {border-bottom:1px solid var(--border); padding-bottom:0.35rem;}
+  /* Engranaje: reservado para la configuración del asistente. Texto accesible oculto a la vista. */
+  .st-key-ia_settings button {min-height:36px; width:36px; padding:0 !important; border-radius:10px !important;}
+  .st-key-ia_settings button p {position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0);
+      white-space:nowrap;}
+  .st-key-ia_settings {display:flex; justify-content:flex-end;}
+  .st-key-ia_header [data-testid="stHorizontalBlock"] {flex-wrap:nowrap !important;}
+  .st-key-ia_header [data-testid="stColumn"]:first-child {flex:1 1 auto !important; min-width:0; width:auto !important;}
+  .st-key-ia_header [data-testid="stColumn"]:last-child {flex:0 0 auto !important; width:auto !important; min-width:0;}
+  .ia-me, .ia-bot {font-size:0.84rem; line-height:1.45; border-radius:12px; padding:0.5rem 0.7rem; margin:0.35rem 0;
+      max-width:92%;}
+  .ia-me {background:var(--chat-me); color:var(--chat-me-fg); margin-left:auto; border-bottom-right-radius:4px;}
+  .ia-bot {background:var(--surface-2); color:var(--text);}
+  .ia-meta {font-size:0.68rem; color:var(--muted); margin:-0.15rem 0 0.25rem;}
+  .ia-beds {display:flex; flex-wrap:wrap; gap:0.3rem; margin-top:0.35rem;}
+  .ia-beds span {background:var(--ok-bg); border:1px solid var(--ok-bd); color:var(--ok-fg); border-radius:7px;
+      padding:0.15rem 0.45rem; font-size:0.75rem; font-weight:600;}
+  .st-key-ia_panel [data-testid="stChatMessage"] {padding:0.3rem 0.4rem; background:var(--surface-3);}
+  .st-key-ia_panel [data-testid="stChatMessage"] p {font-size:0.84rem;}
+  .st-key-ia_panel .stButton button {font-size:0.78rem; padding:0.2rem 0.5rem; min-height:0;}
+  .st-key-ia_panel .st-key-ia_settings button {min-height:36px;}
+  @media (max-width: 640px) {
+    .st-key-ia_panel {right:8px; left:8px; bottom:78px; width:auto; max-height:calc(100vh - 96px);}
+    .st-key-ia_fab {right:14px; bottom:14px;}
+  }
 </style>
 """
 
@@ -220,18 +231,22 @@ def _bubble() -> None:
     is_open = st.session_state.get("ia_open", False)
     if is_open:
         with st.container(key="ia_panel"):
-            head, close = st.columns([5, 1], vertical_alignment="center")
             scope = _scope()
-            head.markdown('<div class="ia-head"><div><b>Asistente HSLV</b>'
-                          f'<small>{esc(scope.subtitle)}</small></div></div>', unsafe_allow_html=True)
-            if close.button("", icon=":material/close:", key="ia_close", help="Cerrar"):
-                st.session_state.ia_open = False
-                st.rerun(scope="fragment")
+            # Cabecera: título y engranaje. El panel se cierra solo con el botón flotante de abajo ("Cerrar"),
+            # así no hay dos controles que hagan lo mismo. El engranaje queda reservado para la futura
+            # configuración del asistente: visible, accesible y deshabilitado para no simular una función.
+            with st.container(key="ia_header"):
+                head, gear = st.columns([5, 1], vertical_alignment="center")
+                head.markdown('<div class="ia-head"><div><b>Asistente HSLV</b>'
+                              f'<small>{esc(scope.subtitle)}</small></div></div>', unsafe_allow_html=True)
+                with gear:
+                    st.button("Configuración del asistente", icon=":material/settings:", key="ia_settings",
+                              disabled=True, help="Configuración del asistente (disponible próximamente)")
             history = _history()
             thread = st.container(height=PANEL_H, border=False)
             with thread:
                 if not history:
-                    st.markdown(f'<div class="ia-bot" style="background:#F1F5F9;color:{TEXT}">Hola, soy el asistente '
+                    st.markdown('<div class="ia-bot">Hola, soy el asistente '
                                 'del HSLV. Puedes preguntarme, por ejemplo:</div>', unsafe_allow_html=True)
                     for i, q in enumerate(scope.suggestions):
                         label = SHORT[i] if scope.code == "completo" and i < len(SHORT) else q
@@ -262,7 +277,8 @@ def _bubble() -> None:
                     st.rerun(scope="fragment")
     with st.container(key="ia_fab"):
         if st.button("Cerrar" if is_open else "Pregúntale a la IA", key="ia_toggle",
-                     icon=":material/close:" if is_open else ":material/auto_awesome:"):
+                     icon=":material/close:" if is_open else ":material/auto_awesome:",
+                     help="Cerrar el asistente" if is_open else "Abrir el asistente del hospital"):
             st.session_state.ia_open = not is_open
             st.rerun(scope="fragment")
 

@@ -1024,6 +1024,6 @@ if __name__ == "__main__":  # Demo por consola: python agent.py
     print(f"Motor: {agent.mode} | LLM: {agent.llm.name if agent.llm else 'ninguno'} | hoy = {agent.ref}")
     for q in KEY_QUESTIONS:
         r = agent.ask(q)
-        print(f"\n❓ {q}\n🤖 [{r.engine}, {r.elapsed_ms} ms] {r.answer}")
+        print(f"\nPregunta: {q}\nRespuesta [{r.engine}, {r.elapsed_ms} ms]: {r.answer}")
         if r.data is not None:
             print(r.data.head(5).to_string(index=False))
