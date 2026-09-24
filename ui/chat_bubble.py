@@ -109,7 +109,8 @@ def ask(question: str) -> AgentResponse:
     user = ctx.current_user()
     t0 = time.time()
     resp = scope_mod.answer(question, _scope(), agent=ctx.get_agent(), bed_answer=_bed_answer, clin=ctx.get_clin(),
-                            id_paciente=user.get("id_paciente"), now=ctx.clock())
+                            id_paciente=user.get("id_paciente"), now=ctx.clock(),
+                            forecasts=ctx.can("tablero.gerencial.ver"))
     resp.elapsed_ms = resp.elapsed_ms or int((time.time() - t0) * 1000)
     return resp
 
@@ -119,7 +120,8 @@ def ask(question: str) -> AgentResponse:
 # ---------------------------------------------------------------------------
 ENGINE_SHORT = {"llm": "🧠 IA", "reglas": "✓ Respuesta verificada", "reglas (respaldo)": "✓ Respuesta verificada",
                 "seguridad": "⛔ Bloqueado", "sql directo": "⌨️ Consulta validada", "mapa de camas": "🛏️ Mapa de camas",
-                "glosario": "📖 Glosario", "mis datos": "🔒 Solo tus datos", "fuera de alcance": "🔒 Acceso limitado"}
+                "glosario": "📖 Glosario", "mis datos": "🔒 Solo tus datos", "fuera de alcance": "🔒 Acceso limitado",
+                "modelo predictivo": "📈 Modelo predictivo"}
 
 
 def _render(resp: AgentResponse, idx: int) -> None:

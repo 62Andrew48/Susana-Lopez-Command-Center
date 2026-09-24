@@ -45,7 +45,7 @@ cp .env.example .env              # y configura LLM_PROVIDER + API key para acti
 python database.py --rebuild      # reconstruir la base manualmente
 uvicorn api:app --port 8000       # API REST -> http://localhost:8000/docs
 python agent.py                   # demo por consola de las 4 preguntas
-python -m pytest -q               # 110 pruebas (seguridad, intenciones, LLM simulado, ciclo clínico, RBAC, operación)
+python -m pytest -q               # 121 pruebas (seguridad, intenciones, LLM simulado, ciclo clínico, RBAC, operación, microservicios)
 ```
 
 Sin `.env` todo funciona en modo **Plan B** (sin red y sin costo).
@@ -73,6 +73,24 @@ La interfaz se reorganizó para que cada rol vea primero lo que tiene que hacer,
 
 - **Glosario del sector salud** (tomado del glosario entregado con el reto): al pasar el cursor por un término y
   en el chat ("¿qué es triage II?").
+
+## Microservicios predictivos (solo gerencia)
+
+Cuatro servicios Flask independientes en `microservicios/` (urgencias, quirófanos, farmacia y consulta
+externa), cada uno con un Random Forest validado con partición temporal contra una línea base ingenua
+(detalle en `microservicios/README.md`). La app los consume con `ml_services.py`:
+
+- **Página "Pronósticos"** (Admin): una tarjeta por servicio con la predicción, su rango probable, si mejora o
+  no a la línea base y el reporte Excel.
+- **Asistente:** una pregunta de pronóstico ("¿cuántos ingresos a urgencias se esperan mañana?") va al
+  microservicio del dominio.
+- **Fiabilidad:** tiempo máximo de 2 s por llamada y circuit breaker de 30 s. Si un servicio cae, su tarjeta
+  dice "no disponible", las demás siguen y el asistente responde con el histórico avisando el motivo.
+
+```bash
+for s in microservicios/service_*/; do pip install -r "$s/requirements.txt"; done
+python microservicios/run_services.py      # en otra terminal; la app funciona también sin ellos
+```
 
 ## Versión 2: módulo clínico con roles (RBAC)
 
@@ -175,7 +193,8 @@ sequenceDiagram
 | `pharmacy_service.py` | Servicio | Ciclo de prescripción, caducidad con retorno a stock y autorización RBAC |
 | `demo_seed.py` | — | Escenario de demostración y reloj clínico |
 | `api.py` | Servicio | Endpoints REST del reto |
-| `tests/` | — | 110 pruebas: seguridad SQL, intenciones, LLM simulado, ciclo clínico, RBAC, camas, cola, notificaciones y alcance del asistente |
+| `ml_services.py` | Servicio | Cliente de los microservicios con tiempo máximo y circuit breaker |
+| `tests/` | — | 121 pruebas: seguridad SQL, intenciones, LLM simulado, ciclo clínico, RBAC, camas, cola, notificaciones y alcance del asistente |
 
 ## Modelo de datos (`hospital.db`)
 

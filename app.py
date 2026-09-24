@@ -30,6 +30,7 @@ from ui import pages_analytics as pa
 from ui import pages_camas as pm
 from ui import pages_clinical as pc
 from ui import pages_hoy as ph
+from ui import pages_predicciones as pp
 from ui.theme import chip, inject_css
 
 st.set_page_config(page_title="HSLV · Centro de mando operativo", page_icon="🏥", layout="wide")
@@ -97,6 +98,7 @@ CATALOG = [  # grupo del menú, slug, título, icono, página, permisos que la h
      {"hc.ver_notas", "hc.ver_completa", "prescripcion.crear", "dispensacion.registrar"}),
     ("Clínico", "portal", "Mis fórmulas y citas", "🧑", pc.page_portal, {"portal.propio"}),
     ("Gestión", "tablero", "Indicadores", "📊", pa.page_tablero, {"tablero.gerencial.ver", "camas.ver"}),
+    ("Gestión", "predicciones", "Pronósticos", "📈", pp.page_predicciones, {"tablero.gerencial.ver"}),
     ("Gestión", "asistente", "Asistente IA", "🤖", pa.page_asistente, {"agente.consultar"}),
     ("Gestión", "datos", "Datos y auditoría", "🗂️", pa.page_datos, {"auditoria.ver"}),
 ]

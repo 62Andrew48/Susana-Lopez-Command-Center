@@ -4,7 +4,9 @@ ui/assistant_scope.py — Qué puede responder el asistente según el rol (lógi
 El alcance se decide por PERMISOS del RBAC, no por el nombre del rol:
 
   * completo   (agente.consultar: Admin, Médico)  -> glosario, ubicar camas y agente NL2SQL sobre la base
-                                                     analítica anonimizada (LLM o Plan B).
+                                                     analítica anonimizada (LLM o Plan B). Con
+                                                     tablero.gerencial.ver (Admin) además enruta los
+                                                     pronósticos a los microservicios predictivos.
   * operativo  (camas.ver / farmacia.alertas.ver, sin agente.consultar: Enfermería)
                                                   -> glosario, ubicar camas y SOLO las preguntas operativas del
                                                      Plan B (camas, inventario, rotación, espera, alertas). Sin LLM,
@@ -123,9 +125,26 @@ def _patient_answer(question: str, clin: sqlite3.Connection, id_paciente: int, n
 # ---------------------------------------------------------------------------
 # Punto de entrada
 # ---------------------------------------------------------------------------
+def _forecast(question: str, agent) -> AgentResponse | None:
+    """Pronósticos -> microservicio del dominio. Si el servicio no responde, cae al agente y lo avisa."""
+    import ml_services as ml
+    service = ml.route(question)
+    if service is None:
+        return None
+    try:
+        return AgentResponse(question, ml.describe(service, ml.predict(service.code)), engine="modelo predictivo")
+    except ml.ServiceUnavailable as exc:
+        resp = agent.ask(question)
+        resp.answer = (f"_El pronóstico de {service.name} no está disponible en este momento; "
+                       f"respondo con el histórico._\n\n{resp.answer}")
+        resp.error = str(exc)
+        return resp
+
+
 def answer(question: str, scope: Scope, *, agent=None, bed_answer=None, clin=None, id_paciente=None,
-           now: str | None = None) -> AgentResponse:
-    """Responde dentro del alcance del rol. `bed_answer` es la función que ubica camas libres."""
+           now: str | None = None, forecasts: bool = False) -> AgentResponse:
+    """Responde dentro del alcance del rol. `bed_answer` ubica camas libres; `forecasts` habilita los
+    microservicios predictivos (solo gerencia)."""
     question = (question or "").strip()[:500]
     if not question:
         return AgentResponse(question, "Escribe tu pregunta.")
@@ -148,7 +167,8 @@ def answer(question: str, scope: Scope, *, agent=None, bed_answer=None, clin=Non
         return beds
 
     if scope.code == "completo":
-        return agent.ask(question)
+        predicted = _forecast(question, agent) if forecasts else None
+        return predicted or agent.ask(question)
 
     # operativo: solo intenciones verificadas del Plan B, sin LLM ni SQL libre
     intent = agent.match_intent(question)
