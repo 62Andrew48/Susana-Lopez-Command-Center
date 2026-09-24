@@ -35,7 +35,8 @@ EVENT_STYLE = {  # color del punto en la línea de tiempo de la historia clínic
     "ADMINISTRACION_DOSIS": EMERALD, "FORMULA_CADUCADA": RED, "ALERTA": AMBER, "CITA": BLUE_LIGHT,
     "INTERCONSULTA": BLUE_LIGHT, "REGISTRO_HC": "#0F766E", "ADJUNTO": GREY, "DATOS_PACIENTE": GREY,
 }
-RX_STATE_TONE = {"VIGENTE": "info", "PARCIAL": "warn", "ENTREGADA": "ok", "CADUCADA": "danger", "ANULADA": "neutral"}
+RX_LABEL = {"PENDIENTE_STOCK": "En espera de existencias"}
+RX_STATE_TONE = {"PENDIENTE_STOCK": "warn", "VIGENTE": "info", "PARCIAL": "warn", "ENTREGADA": "ok", "CADUCADA": "danger", "ANULADA": "neutral"}
 
 CSS = f"""
 <style>
@@ -133,6 +134,23 @@ CSS = f"""
 
 def inject_css() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
+
+
+# Modo oscuro ("cuidado de la vista"): se invierte la luminosidad de toda la app conservando los tonos
+# (invert + hue-rotate) y se vuelven a su color original las imágenes (logo). Así funciona igual con tablas,
+# gráficos y componentes nativos sin mantener una segunda paleta. Se guarda por usuario.
+DARK_CSS = """
+<style>
+  html, body {background:#111418 !important;}
+  .stApp {filter: invert(0.9) hue-rotate(180deg); background:#F8F9FA;}
+  .stApp img, .stApp video, .stApp [data-testid="stImage"] {filter: invert(1) hue-rotate(180deg);}
+</style>
+"""
+
+
+def inject_dark(enabled: bool) -> None:
+    if enabled:
+        st.markdown(DARK_CSS, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------

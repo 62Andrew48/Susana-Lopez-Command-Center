@@ -112,9 +112,8 @@ def _bar(parts: list[tuple[float, str]]) -> str:
 # ---------------------------------------------------------------------------
 # Datos del día (en caché: no cambian con el reloj salvo la cola)
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=600, show_spinner=False)
 def _beds(day_iso: str):
-    return db.bed_map(ctx.get_conn(), datetime.fromisoformat(day_iso).date())
+    return ctx.live_beds(day_iso)
 
 
 def _physical_occupancy(day) -> dict:

@@ -244,7 +244,7 @@ def annul_record(conn: sqlite3.Connection, registro_id: int, user_id: int, motiv
 
 _RECORD_COLS = """r.id, r.tipo, r.titulo, r.contenido, r.diagnostico_cie10, r.diagnostico_nombre, r.plan,
                   r.autor_id, u.nombre_mostrado AS autor, r.creado_en, r.version, r.actualizado_en,
-                  r.motivo_cambio, r.estado, r.motivo_anulacion,
+                  r.motivo_cambio, r.estado, r.motivo_anulacion, r.origen_externo,
                   (SELECT COUNT(*) FROM hc_adjuntos a WHERE a.registro_id = r.id AND a.estado = 'ACTIVO') AS adjuntos"""
 
 
@@ -366,3 +366,118 @@ def annul_attachment(conn: sqlite3.Connection, adjunto_id: int, user_id: int, mo
     with conn:
         conn.execute("UPDATE hc_adjuntos SET estado = 'ANULADO', motivo_anulacion = ?, anulado_por = ?, "
                      "anulado_en = ? WHERE id = ?", (motivo.strip(), user_id, _now(now), adjunto_id))
+
+
+# ---------------------------------------------------------------------------
+# Ficha clínica: alergias, antecedentes, medicación habitual
+# ---------------------------------------------------------------------------
+FICHA_FIELDS = ("grupo_sanguineo", "alergias", "sin_alergias_conocidas", "antecedentes_personales",
+                "antecedentes_quirurgicos", "antecedentes_familiares", "medicacion_habitual", "habitos",
+                "contacto_emergencia", "telefono_emergencia", "observaciones")
+BLOOD_GROUPS = ("O+", "O-", "A+", "A-", "B+", "B-", "AB+", "AB-")
+
+# Familias de medicamentos para la alerta de alergia (texto de la alergia -> palabras en el nombre del producto)
+ALLERGY_FAMILIES = {
+    "penicilin": ("PENICILIN", "AMOXICILIN", "AMPICILIN", "OXACILIN", "DICLOXACILIN", "PIPERACILIN", "BENZATIN"),
+    "betalact": ("PENICILIN", "AMOXICILIN", "AMPICILIN", "CEFALEXIN", "CEFAZOLIN", "CEFTRIAXON", "CEFEPIM",
+                 "MEROPENEM", "PIPERACILIN"),
+    "cefalospor": ("CEFALEXIN", "CEFAZOLIN", "CEFTRIAXON", "CEFEPIM", "CEFUROXIM", "CEFOTAXIM"),
+    "sulfa": ("SULFAMETOXAZOL", "TRIMETOPRIM SULFA", "SULFADIAZIN"),
+    "aine": ("IBUPROFEN", "DICLOFENAC", "NAPROXEN", "KETOROLAC", "ACETIL SALICILICO", "ASPIRIN", "MELOXICAM",
+             "DIPIRONA", "METAMIZOL"),
+    "ibuprofen": ("IBUPROFEN",), "dipiron": ("DIPIRONA", "METAMIZOL"), "metamizol": ("DIPIRONA", "METAMIZOL"),
+    "yod": ("YODO", "IOPAMIDOL", "IOHEXOL", "POVIDONA"),
+    "latex": ("LATEX",),
+    "opio": ("MORFIN", "TRAMADOL", "HIDROMORFON", "FENTANIL", "CODEIN"),
+    "morfin": ("MORFIN",), "tramadol": ("TRAMADOL",),
+    "quinolon": ("CIPROFLOXACIN", "LEVOFLOXACIN", "MOXIFLOXACIN"),
+    "macrolid": ("AZITROMICIN", "CLARITROMICIN", "ERITROMICIN"),
+}
+
+
+def get_ficha(conn: sqlite3.Connection, id_paciente: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT f.*, u.nombre_mostrado AS actualizado_por_nombre FROM hc_ficha f "
+                        "LEFT JOIN usuarios u ON u.id = f.actualizado_por WHERE f.id_paciente = ?",
+                        (id_paciente,)).fetchone()
+
+
+def save_ficha(conn: sqlite3.Connection, id_paciente: int, user_id: int | None, data: dict,
+               now: datetime | str | None = None) -> list[str]:
+    """Crea o actualiza la ficha. La versión anterior queda guardada (trigger). Devuelve los campos cambiados."""
+    if get_patient(conn, id_paciente) is None:
+        raise sqlite3.IntegrityError("Paciente inexistente")
+    d = {k: _clean(data.get(k)) for k in FICHA_FIELDS if k in data}
+    if "sin_alergias_conocidas" in data:
+        d["sin_alergias_conocidas"] = 1 if data["sin_alergias_conocidas"] else 0
+        if d["sin_alergias_conocidas"]:
+            d["alergias"] = None
+    if d.get("grupo_sanguineo") and d["grupo_sanguineo"] not in BLOOD_GROUPS:
+        raise sqlite3.IntegrityError("Grupo sanguíneo no válido")
+    current = get_ficha(conn, id_paciente)
+    ts = _now(now)
+    if current is None:
+        changed = [k for k, v in d.items() if v]
+        cols = ["id_paciente", *d, "actualizado_por", "actualizado_en"]
+        with conn:
+            conn.execute(f"INSERT INTO hc_ficha({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                         (id_paciente, *d.values(), user_id, ts))
+    else:
+        changed = [k for k, v in d.items() if v != current[k]]
+        if not changed:
+            return []
+        sets = ", ".join(f"{k} = ?" for k in changed)
+        with conn:
+            conn.execute(f"UPDATE hc_ficha SET {sets}, actualizado_por = ?, actualizado_en = ? WHERE id_paciente = ?",
+                         (*[d[k] for k in changed], user_id, ts, id_paciente))
+    if changed:
+        with conn:
+            hc = ensure_history(conn, id_paciente, ts)
+            labels = {"sin_alergias_conocidas": "alergias", "grupo_sanguineo": "grupo sanguíneo"}
+            names = list(dict.fromkeys(labels.get(k, k.replace("_", " ")) for k in changed))
+            conn.execute("INSERT INTO historia_clinica_eventos(historia_id, tipo, descripcion, autor_id, fecha) "
+                         "VALUES (?, 'DATOS_PACIENTE', ?, ?, ?)",
+                         (hc, "Ficha clínica actualizada: " + ", ".join(names), user_id, ts))
+    return changed
+
+
+def ficha_versions(conn: sqlite3.Connection, id_paciente: int) -> list[sqlite3.Row]:
+    return conn.execute("SELECT v.*, u.nombre_mostrado AS reemplazada_por_nombre FROM hc_ficha_versiones v "
+                        "LEFT JOIN usuarios u ON u.id = v.reemplazada_por WHERE v.id_paciente = ? "
+                        "ORDER BY v.id DESC", (id_paciente,)).fetchall()
+
+
+def _norm(text: str) -> str:
+    import unicodedata
+    text = unicodedata.normalize("NFKD", str(text or "").upper())
+    return "".join(c for c in text if not unicodedata.combining(c))
+
+
+def allergy_conflicts(conn: sqlite3.Connection, id_paciente: int, product_name: str) -> list[str]:
+    """Alergias registradas que podrían aplicar al medicamento (por nombre o por familia). Es una ALERTA:
+    la decisión clínica sigue siendo del médico."""
+    ficha = get_ficha(conn, id_paciente)
+    if ficha is None or not ficha["alergias"]:
+        return []
+    product = _norm(product_name)
+    hits = []
+    for raw in str(ficha["alergias"]).replace(",", ";").split(";"):
+        allergy = raw.strip()
+        term = _norm(allergy.split("(")[0]).strip()
+        if len(term) < 3:
+            continue
+        words = {w[:-1] if w.endswith("S") else w for w in term.split() if len(w) >= 4}
+        direct = any(w in product for w in words)
+        family = any(key.upper() in term and any(k in product for k in keys)
+                     for key, keys in ALLERGY_FAMILIES.items())
+        if direct or family:
+            hits.append(allergy)
+    return hits
+
+
+def current_bed(conn: sqlite3.Connection, id_paciente: int) -> sqlite3.Row | None:
+    """Cama asignada al paciente en la app (último movimiento de esa cama es OCUPAR para él)."""
+    return conn.execute("""
+        SELECT a.* FROM camas_asignaciones a
+         WHERE a.id_paciente = ? AND a.accion = 'OCUPAR'
+           AND a.id = (SELECT MAX(b.id) FROM camas_asignaciones b WHERE b.codigo_cama = a.codigo_cama)
+         ORDER BY a.id DESC LIMIT 1""", (id_paciente,)).fetchone()

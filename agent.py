@@ -845,6 +845,8 @@ GROUP BY 1 ORDER BY 1""")
         if not df.empty:
             worst = df.sort_values("espera_promedio_min", ascending=False).iloc[0]
             answer += f" La mayor espera la tiene {worst.triage} con {fmt_minutes(worst.espera_promedio_min)}."
+        if re.search(r"por ?que|causa|aument|sub(e|io)|baj(a|o)|explica", normalize(question)):
+            answer += "\n\n" + db.explain_wait_change(db.wait_root_cause(self.conn, self.ref))
         return AgentResponse(question, answer, sql, df,
                              chart={"type": "bar", "x": "triage", "y": "espera_promedio_min"},
                              recommendations=self.recommender.wait_alerts())

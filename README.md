@@ -52,6 +52,31 @@ Sin `.env` todo funciona en modo **Plan B** (sin red y sin costo).
 
 ---
 
+## Versión 4: pacientes, historia clínica, citas y personal
+
+| Módulo | Admin | Médico | Enfermería | Facturación | Paciente |
+|---|---|---|---|---|---|
+| Pacientes (registrar, editar, inactivar) | ✓ | ✓ | | ✓ | |
+| Ficha del paciente (alergias, antecedentes, cama, fórmulas, citas) | lectura | ✓ edita | lectura | | la suya |
+| Registros de historia clínica y adjuntos (crear, corregir con versión, anular) | lectura | ✓ | lectura | | la suya |
+| Buscar historias, descargar PDF, exportar e importar (JSON) | ✓ | ✓ | busca | | busca en la suya y descarga |
+| Alerta de alergia al formular (penicilinas, AINE, sulfas…) | | ✓ | | | |
+| Medicamento sin existencias: en espera, fecha de llegada, se aparta al llegar (30 días) | pedidos | formula | entrega | | ve la fecha |
+| Ocupar / liberar camas con estancia estimada | ✓ | ✓ | ✓ | | |
+| Citas (cupos según el turno del médico, sin doble agenda) | | su agenda | | ✓ | agenda y cancela |
+| Turnos de atención (C-007, prioridad Ley 1171 de 2007, pantalla sin nombres) | | llama | | ✓ | ve cuántos hay antes |
+| Usuarios (crear con clave temporal, suspender, restablecer) y turnos del personal | ✓ | | | | |
+| Recuperar contraseña (código de 6 dígitos, 15 min, un uso) y modo oscuro | todos | todos | todos | todos | todos |
+
+Cuentas de prueba (contraseña `demo`): `admin`, `dra.ruiz`, `dr.paredes`, `enf.gomez`, `enf.castro`,
+`facturacion.alejandro` (facturación y admisiones: citas y turnos de atención), `paciente.laura`, `paciente.110`. Los cinco pacientes con nombre (Laura, Carlos, María,
+Juan José y Rosa) son **casos sintéticos** de demostración; los pacientes del extracto llegan anonimizados.
+
+Seguridad añadida: contraseñas nuevas con PBKDF2-SHA256 y sal; política de 8 caracteres con letras y números;
+cambio obligatorio de la clave temporal; códigos de recuperación guardados como huella; la historia clínica,
+las versiones, los adjuntos y los movimientos de camas no se borran (Res. 1995 de 1999); cada búsqueda, descarga,
+exportación e importación queda en la bitácora.
+
 ## Versión 3: una pantalla por pregunta
 
 La interfaz se reorganizó para que cada rol vea primero lo que tiene que hacer, no el histórico:

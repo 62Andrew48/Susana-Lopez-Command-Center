@@ -14,7 +14,7 @@ import pharmacy_service as ps  # noqa: E402
 PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
 NOW = "2026-09-21 10:00:00"
-DRA, ADMIN, OTRO = 2, 1, 9
+DRA, ADMIN, OTRO = 2, 1, 99
 
 
 @pytest.fixture()
@@ -23,7 +23,7 @@ def clin(tmp_path):
     ds.seed(c, config.DB_PATH)
     with c:
         c.execute("INSERT INTO usuarios(id, usuario, hash_password, nombre_mostrado, rol_id, estado_cuenta, "
-                  "registro_profesional) VALUES (9, 'dr.otro', 'x', 'Dr. Otro', 2, 'ACTIVO', 'RM-9')")
+                  "registro_profesional) VALUES (99, 'dr.otro', 'x', 'Dr. Otro', 2, 'ACTIVO', 'RM-9')")
     yield c
     c.close()
 
@@ -182,11 +182,18 @@ def test_search_records_by_text_type_dates_and_author(clin):
     assert not cr.search_records(clin, desde="2026-10-01")
 
 
-def test_admin_can_search_but_not_read_clinical_content(clin):
+def test_admin_reads_and_exports_but_does_not_write_clinical_notes(clin):
     perms = ps.user_permissions(clin, ADMIN)
-    assert {"hc.buscar", "pacientes.registrar"} <= perms
-    assert "hc.ver_completa" not in perms and "hc.registrar" not in perms
-    assert not ps.authorize(clin, ADMIN, "hc.ver_completa", 110, now=NOW).allowed
+    assert {"hc.buscar", "pacientes.registrar", "hc.ver_completa", "hc.exportar"} <= perms
+    assert "hc.registrar" not in perms and "prescripcion.crear" not in perms
+    assert ps.authorize(clin, ADMIN, "hc.ver_completa", 110, now=NOW).allowed
+    assert not ps.authorize(clin, ADMIN, "hc.registrar", 110, now=NOW).allowed
+
+
+def test_nurse_and_patient_can_only_search_or_read(clin):
+    nurse = ps.user_permissions(clin, 3)
+    assert "hc.buscar" in nurse and "hc.registrar" not in nurse
+    assert ps.user_permissions(clin, 4) == {"portal.propio"}
 
 
 def test_doctor_off_duty_needs_break_glass_to_write(clin):
@@ -221,5 +228,130 @@ def test_old_schema_database_is_backed_up_and_recreated(tmp_path):
     old.close()
     conn = ps.init_clinical_db(config.DB_PATH, path)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == ps.SCHEMA_VERSION
-    assert (tmp_path / "clinico_respaldo_v1.db").exists()
+    assert (tmp_path / "clinico_respaldo_v1.db").exists()  # guarda la versión encontrada
     conn.close()
+
+
+# --- Ficha, alergias, PDF, exportar/importar, camas ------------------------------------------
+def test_ficha_versions_and_allergy_alert(clin):
+    pid = _new_patient(clin, "1061999000")
+    cr.save_ficha(clin, pid, DRA, {"alergias": "Penicilina (urticaria); Sulfas"}, NOW)
+    assert cr.allergy_conflicts(clin, pid, "AMOXICILINA 500 MG CAPSULA") == ["Penicilina (urticaria)"]
+    assert cr.allergy_conflicts(clin, pid, "SULFAMETOXAZOL 800 MG") == ["Sulfas"]
+    assert cr.allergy_conflicts(clin, pid, "ACETAMINOFEN 500 MG") == []
+    cr.save_ficha(clin, pid, DRA, {"sin_alergias_conocidas": True}, "2026-09-22 10:00:00")
+    assert cr.get_ficha(clin, pid)["alergias"] is None
+    assert len(cr.ficha_versions(clin, pid)) == 1
+    with pytest.raises(sqlite3.IntegrityError):
+        with clin:
+            clin.execute("DELETE FROM hc_ficha WHERE id_paciente = ?", (pid,))
+
+
+def test_synthetic_cases_are_seeded_with_allergies_and_labs(clin):
+    laura = cr.search_patients(clin, "Laura Gómez")[0]
+    assert "Penicilina" in cr.get_ficha(clin, laura["id_paciente"])["alergias"]
+    assert len(cr.records(clin, laura["id_paciente"])) == 3
+    assert cr.attachments(clin, laura["id_paciente"])[0]["tipo_mime"] == "application/pdf"
+    assert cr.search_records(clin, text="neumonía")
+
+
+def test_pdf_and_json_round_trip(clin, tmp_path):
+    import hc_documents as hd
+    laura = cr.search_patients(clin, "1061700001")[0]["id_paciente"]
+    pdf = hd.patients_pdf(clin, [laura, 110], "Dra. Ruiz", NOW)
+    assert pdf.startswith(b"%PDF") and len(pdf) > 3000
+    raw = hd.export_json(clin, [laura], "Dra. Ruiz", NOW)
+    other = ps.init_clinical_db(config.DB_PATH, tmp_path / "otra_sede.db")
+    ds.seed(other, config.DB_PATH)  # la otra sede ya tiene a Laura: se reconoce por documento, no se duplica
+    first = hd.import_json(other, raw, ADMIN, NOW)
+    assert first["pacientes_existentes"] == 1 and first["omitidos"] == 3 and not first["errores"]
+    fresh = ps.init_clinical_db(config.DB_PATH, tmp_path / "vacia.db")
+    with fresh:
+        fresh.execute("INSERT INTO usuarios(id, usuario, hash_password, nombre_mostrado, rol_id, estado_cuenta) "
+                      "VALUES (1, 'admin', 'x', 'Admin', 1, 'ACTIVO')")
+    res = hd.import_json(fresh, raw, 1, NOW)
+    assert res["pacientes_nuevos"] == 1 and res["registros"] == 3 and res["adjuntos"] == 1
+    rec = cr.search_records(fresh, text="neumonía")[0]
+    assert "autor original Dra. Ruiz" in rec["origen_externo"]
+    with pytest.raises(sqlite3.IntegrityError, match="Formato"):
+        hd.import_json(fresh, b'{"hola": 1}', 1, NOW)
+
+
+def test_tampered_attachment_is_rejected_on_import(clin, tmp_path):
+    import json
+
+    import hc_documents as hd
+    laura = cr.search_patients(clin, "1061700001")[0]["id_paciente"]
+    doc = json.loads(hd.export_json(clin, [laura], "x", NOW))
+    doc["pacientes"][0]["adjuntos"][0]["contenido_base64"] = "JVBERi0xLjQKaGFja2Vk"
+    fresh = ps.init_clinical_db(config.DB_PATH, tmp_path / "v.db")
+    with fresh:
+        fresh.execute("INSERT INTO usuarios(id, usuario, hash_password, nombre_mostrado, rol_id, estado_cuenta) "
+                      "VALUES (1, 'admin', 'x', 'Admin', 1, 'ACTIVO')")
+    res = hd.import_json(fresh, json.dumps(doc).encode(), 1, NOW)
+    assert res["adjuntos"] == 0 and "huella" in res["errores"][0]
+
+
+def test_occupy_and_release_bed(clin):
+    import pandas as pd
+
+    import beds_service as bs
+    pid = _new_patient(clin, "1061555000")
+    bs.occupy(clin, codigo_cama="H-203C", id_paciente=pid, dias_estimados=5, usuario_id=3, cama_ocupada=False, now=NOW)
+    assert cr.current_bed(clin, pid)["codigo_cama"] == "H-203C"
+    with pytest.raises(sqlite3.IntegrityError, match="ya tiene asignada"):
+        bs.occupy(clin, codigo_cama="H-204A", id_paciente=pid, dias_estimados=3, usuario_id=3, cama_ocupada=False,
+                  now=NOW)
+    with pytest.raises(sqlite3.IntegrityError, match="ocupada"):
+        bs.occupy(clin, codigo_cama="H-203C", id_paciente=110, dias_estimados=3, usuario_id=3, cama_ocupada=True,
+                  now=NOW)
+    beds = pd.DataFrame({"codigo_cama": ["H-203C", "H-204A"], "ocupada": [0, 1], "pacientes": [0, 1],
+                         "dias_estancia": [0.0, 20.0]})
+    view = bs.apply(beds, clin, "2026-09-23 10:00:00")
+    assert view.loc[0, "ocupada"] == 1 and view.loc[0, "dias_estancia"] == 2.0 and view.loc[0, "salida_estimada"]
+    bs.release(clin, codigo_cama="H-203C", motivo="Alta médica", usuario_id=3, cama_ocupada=True, now=NOW)
+    bs.release(clin, codigo_cama="H-204A", motivo="Traslado a otra unidad", usuario_id=3, cama_ocupada=True, now=NOW)
+    view = bs.apply(beds, clin, NOW)
+    assert list(view["ocupada"]) == [0, 0] and cr.current_bed(clin, pid) is None
+    assert any("Liberada la cama H-203C" in e["descripcion"] for e in ps.patient_timeline(clin, pid))
+
+
+# --- Sin existencias: en espera, fecha estimada y apartado al llegar el pedido ---------------------
+def _empty_product(clin):
+    code = clin.execute("SELECT codigo FROM productos_farmacia WHERE tipo_item = 'Medicamento' LIMIT 1").fetchone()[0]
+    left = ps.stock_of(clin, [code])[code]["disponible"]
+    if left:
+        ps.adjust_stock(clin, code, 0, ADMIN, "Conteo: estantería vacía", NOW)
+    return code
+
+
+def test_out_of_stock_prescription_waits_and_is_reserved_on_arrival(clin):
+    code = _empty_product(clin)
+    first = ps.prescribe(clin, medico_id=DRA, id_paciente=110, codigo=code, dosis="1 tab", frecuencia_horas=8,
+                         duracion_dias=1, dosis_prescritas=3, ambito="AMBULATORIA", now=NOW)
+    second = ps.prescribe(clin, medico_id=DRA, id_paciente=634732 if cr.get_patient(clin, 634732) else 110,
+                          codigo=code, dosis="1 tab", frecuencia_horas=8, duracion_dias=2, dosis_prescritas=6,
+                          ambito="AMBULATORIA", now="2026-09-21 11:00:00")
+    state = lambda pid: clin.execute("SELECT estado FROM prescripciones WHERE id = ?", (pid,)).fetchone()[0]
+    assert state(first) == state(second) == "PENDIENTE_STOCK"
+    assert ps.stock_of(clin, [code])[code]["reservado"] == 0
+    with pytest.raises(sqlite3.IntegrityError, match="sin existencias"):
+        ps.dispense(clin, first, 3, 1, NOW)
+    ps.create_order(clin, code, 50, "2026-09-25", ADMIN, "Droguería del Cauca", NOW)
+    assert ps.expected_arrival(clin, code) == "2026-09-25"
+    assert {b["id"] for b in ps.backorders(clin, code)} == {first, second}
+    # llegan solo 5: alcanza para la primera (3) pero no para la segunda (6); FIFO estricto
+    got = ps.receive_stock(clin, code, 5, ADMIN, "Factura 123", "2026-09-25 09:00:00")
+    assert got == [first] and state(first) == "VIGENTE" and state(second) == "PENDIENTE_STOCK"
+    row = clin.execute("SELECT fecha_limite_reclamo FROM prescripciones WHERE id = ?", (first,)).fetchone()
+    assert row[0] == "2026-10-25 09:00:00"                      # 30 días desde que se apartó, no desde la fórmula
+    assert ps.stock_of(clin, [code])[code]["reservado"] == 3
+    assert ps.receive_stock(clin, code, 10, ADMIN, "", "2026-09-26 09:00:00") == [second]
+    ps.dispense(clin, first, 3, 3, "2026-09-26 10:00:00")
+    assert any("Llegó el medicamento" in e["descripcion"] for e in ps.patient_timeline(clin, 110))
+
+
+def test_order_date_cannot_be_in_the_past(clin):
+    code = _empty_product(clin)
+    with pytest.raises(sqlite3.IntegrityError, match="anterior"):
+        ps.create_order(clin, code, 10, "2026-09-01", ADMIN, "", NOW)

@@ -16,8 +16,9 @@ import demo_seed as ds
 import pharmacy_service as ps
 from agent import fmt_num
 from ui import context as ctx
+from ui import pages_atencion as pa
 from ui import pages_hc as hc
-from ui.theme import (AMBER, BLUE, EMERALD, EVENT_STYLE, GREY, RED, RX_STATE_TONE, banner, card, chip, esc,
+from ui.theme import (AMBER, BLUE, EMERALD, EVENT_STYLE, GREY, RED, RX_LABEL, RX_STATE_TONE, banner, card, chip, esc,
                       grid, section_title)
 
 FMT = "%Y-%m-%d %H:%M:%S"
@@ -35,6 +36,15 @@ def _hours_left(limit: str) -> float:
 
 def _fmt_ts(ts: str) -> str:
     return _dt(ts).strftime("%d/%m/%Y %H:%M")
+
+
+def _day(iso: str | None) -> str:
+    if not iso:
+        return "—"
+    months = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
+              "noviembre", "diciembre"]
+    d = datetime.strptime(iso[:10], "%Y-%m-%d")
+    return f"{d.day} de {months[d.month - 1]}"
 
 
 def _left_text(limit: str) -> str:
@@ -81,6 +91,7 @@ def _prescription_tab() -> None:
     decision = hc.gate("prescripcion.crear", id_paciente, "rx")
     if not decision.allowed:
         return
+    hc.allergy_banner(id_paciente)
     products = {r["codigo"]: r["nombre"] for r in clin.execute(
         "SELECT codigo, nombre FROM productos_farmacia WHERE tipo_item = 'Medicamento' ORDER BY nombre")}
     codigo = st.selectbox("Medicamento", list(products), format_func=lambda c: f"{products[c]} · {c}",
@@ -114,14 +125,37 @@ def _prescription_tab() -> None:
         c6.markdown(f"<div style='padding-top:1.9rem;font-size:0.9rem'>"
                     + (f"Se apartan para el paciente por <b>{ps.RESERVE_DAYS} días</b>" if scope == "AMBULATORIA"
                        else "Se entrega en piso (no se aparta)") + "</div>", unsafe_allow_html=True)
-        if st.button("Formular y reservar stock", type="primary"):
+        if scope == "AMBULATORIA" and info.get("disponible", 0) < units:
+            eta = ps.expected_arrival(clin, codigo)
+            banner(f"<b>Sin existencias suficientes</b> ({fmt_num(info.get('disponible', 0))} disponibles). Puedes "
+                   "formular igual: queda en espera y se aparta al paciente cuando llegue el pedido"
+                   + (f" (llegada estimada {_day(eta)})." if eta else " (aún no hay pedido registrado)."), "warn")
+        conflicts = cr.allergy_conflicts(clin, id_paciente, products[codigo])
+        confirmed = True
+        if conflicts:
+            banner("<b>Posible alergia:</b> el paciente tiene registrada " + esc("; ".join(conflicts)) +
+                   f" y <b>{esc(products[codigo].capitalize())}</b> podría estar relacionado.", "danger")
+            confirmed = st.checkbox("Revisé la alergia y prescribo bajo mi criterio clínico (queda en la bitácora)",
+                                    key=f"allergy_ok_{id_paciente}_{codigo}")
+        if st.button("Formular y reservar stock", type="primary", disabled=not confirmed):
+            if conflicts:
+                ps.audit(clin, ctx.user_id(), "ALERGIA_CONFIRMADA",
+                         f"{products[codigo]} pese a: {'; '.join(conflicts)}", id_paciente, ctx.clock())
             try:
                 pid = ps.prescribe(clin, medico_id=ctx.user_id(), id_paciente=id_paciente, codigo=codigo,
                                    dosis=dosis, frecuencia_horas=int(freq), duracion_dias=int(days),
                                    dosis_prescritas=int(units), ambito=scope, now=ctx.clock())
-                st.success(f"Fórmula #{pid} creada. " + (f"Las {int(units)} unidades quedan apartadas para el paciente "
-                           f"{ps.RESERVE_DAYS} días; si no las reclama, vuelven a estar disponibles."
-                           if scope == "AMBULATORIA" else "Queda en la cola de dispensación hospitalaria."))
+                state = clin.execute("SELECT estado FROM prescripciones WHERE id = ?", (pid,)).fetchone()[0]
+                if state == "PENDIENTE_STOCK":
+                    eta = ps.expected_arrival(clin, codigo)
+                    st.warning(f"Fórmula #{pid} creada, pero **no hay existencias suficientes**. Queda en espera: "
+                               + (f"el pedido llega el **{_day(eta)}**" if eta else
+                                  "**no hay pedido registrado**; farmacia debe pedirlo (Inventario → Pedidos)")
+                               + f". Cuando llegue se aparta sola para el paciente por {ps.RESERVE_DAYS} días.")
+                else:
+                    st.success(f"Fórmula #{pid} creada. " + (f"Las {int(units)} unidades quedan apartadas para el "
+                               f"paciente {ps.RESERVE_DAYS} días; si no las reclama, vuelven a estar disponibles."
+                               if scope == "AMBULATORIA" else "Queda en la cola de dispensación hospitalaria."))
                 st.toast("Fórmula registrada en la historia clínica", icon=":material/edit_note:")
             except sqlite3.IntegrityError as exc:
                 st.error(f"No se pudo formular: {exc}")
@@ -205,6 +239,19 @@ def _dispensing_tab() -> None:
             "Quedan": _left_text(h["fecha_limite_reclamo"]), "Médico": h["medico"]} for h in held]),
             hide_index=True, width="stretch", height=min(38 * (len(held) + 1), 260))
 
+    # --- Fórmulas en espera de existencias ---
+    waiting = ps.backorders(clin)
+    if waiting:
+        section_title("En espera de existencias")
+        st.caption("Formuladas cuando no había stock. Al registrar la llegada del pedido (Inventario) se apartan "
+                   f"solas, en orden de llegada, y el paciente tiene {ps.RESERVE_DAYS} días para reclamarlas.")
+        st.dataframe(pd.DataFrame([{
+            "Paciente": w["paciente"], "Medicamento": w["producto"].capitalize(), "Unidades": w["dosis_prescritas"],
+            "Formulada": _fmt_ts(w["fecha_prescripcion"]),
+            "Llegada estimada": _day(w["llegada_estimada"]) if w["llegada_estimada"] else "Sin pedido",
+            "Médico": w["medico"]} for w in waiting]), hide_index=True, width="stretch",
+            height=min(38 * (len(waiting) + 1), 230))
+
     # --- Cola de entrega ---
     section_title("Cola de entrega")
     can_dispense = ctx.can("dispensacion.registrar")
@@ -257,16 +304,25 @@ def page_portal() -> None:
     st.markdown(f'<div class="brand"><h1 style="color:#111827">Hola, {esc(user["nombre_mostrado"])}</h1></div>',
                 unsafe_allow_html=True)
     st.caption("Aquí solo ves tu propia información. Ningún otro paciente puede verla.")
+    pa.patient_ticket_banner(id_paciente)
     tab_rx, tab_appt, tab_hc = st.tabs(["Mis fórmulas", "Mis citas", "Mi historia clínica"])
     with tab_hc:
         st.markdown(hc.CSS, unsafe_allow_html=True)
         st.caption("Tus registros clínicos y documentos. Tienes derecho a conocerlos (Res. 1995 de 1999).")
+        hc.allergy_banner(id_paciente)
+        c1, c2 = st.columns([2.2, 1], vertical_alignment="bottom")
+        q = c1.text_input("Buscar en mi historia", placeholder="Ej.: neumonía, laboratorio, 2026-09")
+        hc.pdf_button(c2, [id_paciente], "mi_historia_clinica.pdf", "Descargar mi historia (PDF)", key="portal_pdf")
         recs = cr.records(clin, id_paciente, include_annulled=False)
+        if q:
+            words = cr._norm(q).split()
+            recs = [r for r in recs if all(w in cr._norm(f"{r['titulo']} {r['contenido']} {r['diagnostico_nombre'] or ''} "
+                                                          f"{r['plan'] or ''} {r['creado_en']}") for w in words)]
         files = [dict(a) for a in cr.attachments(clin, id_paciente, include_annulled=False)]
         if not recs and not files:
             st.info("Aún no hay registros en tu historia clínica.")
         for r in recs:
-            hc._record_card(r, [a for a in files if a["registro_id"] == r["id"]], id_paciente, False)
+            hc._record_card(r, [a for a in files if a["registro_id"] == r["id"]], id_paciente, False, prefix="portal")
         loose = [a for a in files if a["registro_id"] is None]
         if loose:
             section_title("Documentos")
@@ -285,11 +341,16 @@ def page_portal() -> None:
             if r["estado"] in ("VIGENTE", "PARCIAL") and r["ambito"] == "AMBULATORIA":
                 body += (f"<br>Apartado para ti hasta el <b>{_fmt_ts(r['fecha_limite_reclamo'])}</b> "
                          + _countdown(r["fecha_limite_reclamo"]))
+            if r["estado"] == "PENDIENTE_STOCK":
+                when = (f"llegada estimada el <b>{_day(r['llegada_estimada'])}</b>" if r["llegada_estimada"]
+                        else "la farmacia está gestionando el pedido")
+                body += (f"<br><b>Hoy no hay existencias</b> ({when}). Cuando llegue quedará apartado para ti "
+                         f"{ps.RESERVE_DAYS} días y te avisaremos.")
             if r["estado"] == "CADUCADA":
                 body += "<br>Pasaron los 30 días sin reclamarlo; las unidades apartadas volvieron a la farmacia."
             cards.append(card(r["producto"].capitalize()[:60], body,
                               {"CADUCADA": RED, "ENTREGADA": EMERALD, "PARCIAL": AMBER}.get(r["estado"], BLUE),
-                              chip(r["estado"].capitalize(), RX_STATE_TONE[r["estado"]]),
+                              chip(RX_LABEL.get(r["estado"], r["estado"].capitalize()), RX_STATE_TONE[r["estado"]]),
                               progress=r["dosis_entregadas"] / r["dosis_prescritas"]))
         grid(cards)
         blocked = [r for r in rx if r["estado"] == "CADUCADA" and r["requiere_reevaluacion"]]
@@ -309,11 +370,4 @@ def page_portal() -> None:
                 except sqlite3.IntegrityError as exc:
                     st.error(str(exc))
     with tab_appt:
-        appts = ps.patient_appointments(clin, id_paciente)
-        tone = {"PROGRAMADA": "info", "CUMPLIDA": "ok", "CANCELADA": "neutral", "NO_ASISTIO": "danger"}
-        grid([card(_fmt_ts(c["fecha_hora"]),
-                   f"{esc(c['especialidad'].title())} · {esc(MOTIVO.get(c['motivo'], c['motivo']))}"
-                   + (f" de {esc(c['producto_origen'].capitalize())}" if c["producto_origen"] else "")
-                   + f"<br>Profesional: {esc(c['medico'])}",
-                   BLUE if c["estado"] == "PROGRAMADA" else GREY, chip(c["estado"].capitalize(), tone[c["estado"]]))
-              for c in appts] or [card("Sin citas", "No tienes citas registradas.")])
+        pa.patient_appointments_tab(id_paciente)

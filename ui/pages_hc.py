@@ -18,9 +18,10 @@ import streamlit as st
 
 import clinical_records as cr
 import config
+import hc_documents as hd
 import pharmacy_service as ps
 from ui import context as ctx
-from ui.theme import BORDER, EVENT_STYLE, GREY, MUTED, TEXT, banner, chip, esc, section_title
+from ui.theme import BORDER, EVENT_STYLE, GREY, MUTED, RX_LABEL, TEXT, banner, chip, esc, section_title
 
 FMT_IN = "%Y-%m-%d %H:%M:%S"
 CSS = f"""
@@ -134,6 +135,8 @@ def _err(exc: Exception) -> None:
 def patients_tab() -> None:
     clin, can_edit = ctx.get_clin(), ctx.can("pacientes.registrar")
     st.markdown(CSS, unsafe_allow_html=True)
+    if ctx.can("hc.exportar"):
+        import_panel()
     if can_edit:
         with st.expander("Registrar paciente", icon=":material/person_add:",
                          expanded=st.session_state.pop("pt_register_open", False)):
@@ -194,6 +197,11 @@ def patients_tab() -> None:
         banner(f"Acceso denegado: {esc(decision.reason)}.", "danger")
         return
     _patient_header(row)
+    clinical = "hc.ver_completa" if ctx.can("hc.ver_completa") else "hc.ver_notas" if ctx.can("hc.ver_notas") else None
+    if clinical and ctx.authorize_once(clinical, pid, ctx.emergency_for(pid)).allowed:
+        summary(pid, ctx.can("hc.registrar") and ctx.authorize_once("hc.registrar", pid, ctx.emergency_for(pid)).allowed,
+                key="pt")
+        st.caption("Registros, adjuntos y línea de tiempo: pestaña Historia clínica (el paciente ya queda elegido).")
     if not can_edit:
         return
     with st.expander("Editar datos del paciente", icon=":material/edit:"):
@@ -268,9 +276,19 @@ def history_tab() -> None:
     if row is not None:
         _patient_header(row)
     can_write = ctx.can("hc.registrar") and ctx.authorize_once("hc.registrar", pid, ctx.emergency_for(pid)).allowed
+    summary(pid, can_write)
     if can_write:
         _new_record_form(pid)
-    t_rec, t_files, t_line, t_rx = st.tabs(["Registros", "Adjuntos", "Línea de tiempo", "Fórmulas"])
+    t_rec, t_files, t_line, t_rx, t_ficha = st.tabs(["Registros", "Adjuntos", "Línea de tiempo", "Fórmulas",
+                                                     "Cambios de la ficha"])
+    with t_ficha:
+        versions = cr.ficha_versions(clin, pid)
+        if not versions:
+            st.caption("La ficha no ha tenido cambios.")
+        for v in versions:
+            st.markdown(f"**Reemplazada el {_ts(v['reemplazada_en'])}** por {esc(v['reemplazada_por_nombre'] or '—')}"
+                        f" · vigente desde {_ts(v['vigente_desde'])}")
+            st.json(v["contenido"], expanded=False)
     with t_rec:
         show_annulled = st.toggle("Mostrar anulados", key=f"hc_annulled_{pid}")
         recs = cr.records(clin, pid, include_annulled=show_annulled)
@@ -324,7 +342,7 @@ def _new_record_form(pid: int) -> None:
                     st.error(msg)
 
 
-def _record_card(r, files: list[dict], pid: int, can_write: bool) -> None:
+def _record_card(r, files: list[dict], pid: int, can_write: bool, prefix: str = "hc") -> None:
     annulled = r["estado"] == "ANULADO"
     color = GREY if annulled else EVENT_STYLE.get("REGISTRO_HC")
     meta = (f"{esc(cr.RECORD_TYPES.get(r['tipo'], r['tipo']))} · {_ts(r['creado_en'])} · {esc(r['autor'])}"
@@ -340,10 +358,12 @@ def _record_card(r, files: list[dict], pid: int, can_write: bool) -> None:
                 f'<div class="hc-body">{"<br><br>".join(body)}</div></div>', unsafe_allow_html=True)
     if annulled:
         st.caption(f"Motivo de anulación: {r['motivo_anulacion']}")
+    if r["origen_externo"]:
+        st.caption(r["origen_externo"])
     if files:
         cols = st.columns(min(len(files), 3))
         for i, a in enumerate(files):
-            _download_button(cols[i % 3], a, pid, f"rec{r['id']}")
+            _download_button(cols[i % 3], a, pid, f"{prefix}rec{r['id']}")
     versions = cr.record_versions(ctx.get_clin(), r["id"]) if r["version"] > 1 else []
     mine = can_write and not annulled and r["autor_id"] == ctx.user_id()
     if not (versions or mine):
@@ -398,12 +418,23 @@ def _uploader(container, label: str):
 
 
 def _download_button(container, a: dict, pid: int, key: str) -> None:
-    name, mime, data = cr.attachment_content(ctx.get_clin(), a["id"], pid)
+    """El archivo se lee de la base solo al hacer clic (no en cada recarga de la página)."""
     kb = a["tamano_bytes"] / 1024
-    size = f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{kb:.0f} KB"
-    icon = ":material/picture_as_pdf:" if mime == "application/pdf" else ":material/image:"
-    container.download_button(f"{name} ({size})", data, name, mime, icon=icon, key=f"dl_{key}_{a['id']}",
-                              width="stretch", on_click="ignore")
+    size = f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{max(kb, 1):.0f} KB"
+    icon = ":material/picture_as_pdf:" if a["tipo_mime"] == "application/pdf" else ":material/image:"
+    uid, now = ctx.user_id(), ctx.clock()
+
+    def fetch() -> bytes:
+        conn = _own_conn()
+        try:
+            data = cr.attachment_content(conn, a["id"], pid)[2]
+            ps.audit(conn, uid, "DESCARGA_ADJUNTO", a["nombre_archivo"], pid, now)
+            return data
+        finally:
+            conn.close()
+
+    container.download_button(f"{a['nombre_archivo']} ({size})", fetch, a["nombre_archivo"], a["tipo_mime"],
+                              icon=icon, key=f"dl_{key}_{a['id']}", width="stretch", on_click="ignore")
 
 
 def _attachments_panel(pid: int, can_write: bool) -> None:
@@ -474,8 +505,9 @@ def _prescriptions(pid: int, full: bool) -> None:
         return
     df = pd.DataFrame([{"Medicamento": r["producto"].capitalize(), "Dosis": f"{r['dosis']} c/{r['frecuencia_horas']} h",
                         "Entregadas": f"{r['dosis_entregadas']}/{r['dosis_prescritas']}", "Ámbito": r["ambito"].capitalize(),
-                        "Estado": r["estado"].capitalize(),
-                        "Apartado hasta": _ts(r["fecha_limite_reclamo"]) if r["ambito"] == "AMBULATORIA" else "—",
+                        "Estado": RX_LABEL.get(r["estado"], r["estado"].capitalize()),
+                        "Apartado hasta": ("En espera" if r["estado"] == "PENDIENTE_STOCK" else
+                                           _ts(r["fecha_limite_reclamo"]) if r["ambito"] == "AMBULATORIA" else "—"),
                         "Médico": r["medico"]} for r in rx])
     st.dataframe(df, hide_index=True, width="stretch")
 
@@ -486,14 +518,11 @@ def _prescriptions(pid: int, full: bool) -> None:
 def search_tab() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
     clin = ctx.get_clin()
-    clinical = ctx.can("hc.ver_completa")
+    clinical = ctx.can("hc.ver_completa") or ctx.can("hc.ver_notas")
     if not clinical:
-        banner("Vista de gerencia: ves el <b>índice</b> de las historias (paciente, fecha, tipo y profesional), "
-               "no su contenido clínico. El contenido solo lo abre el equipo de salud (Res. 1995 de 1999). "
-               "Cada búsqueda queda en la bitácora.", "info")
+        banner("Ves el <b>índice</b> de las historias (paciente, fecha, tipo y profesional), no su contenido.", "info")
     c1, c2, c3 = st.columns([2.2, 1.2, 1.2])
-    text = c1.text_input("Buscar", placeholder=("Diagnóstico, CIE-10, texto, paciente o documento" if clinical
-                                                 else "Paciente o documento"), key="hcs_text")
+    text = c1.text_input("Buscar", placeholder="Diagnóstico, CIE-10, síntoma, paciente o documento", key="hcs_text")
     tipo = c2.selectbox("Tipo", [None, *cr.RECORD_TYPES], format_func=lambda t: "Todos" if t is None
                         else cr.RECORD_TYPES[t], key="hcs_tipo")
     people = {r["id"]: r["nombre_mostrado"] for r in cr.authors(clin)}
@@ -504,11 +533,10 @@ def search_tab() -> None:
     hasta = c5.date_input("Hasta", value=None, format="DD/MM/YYYY", key="hcs_hasta")
     annulled = c6.toggle("Incluir anulados", key="hcs_annulled")
 
-    search_text = text if clinical else ""
-    rows = cr.search_records(clin, text=search_text, tipo=tipo, autor_id=autor,
+    rows = cr.search_records(clin, text=text if clinical else "", tipo=tipo, autor_id=autor,
                              desde=desde.isoformat() if desde else None, hasta=hasta.isoformat() if hasta else None,
                              include_annulled=annulled)
-    if not clinical and text:  # gerencia: el texto solo filtra por paciente/documento, nunca por contenido
+    if not clinical and text:  # sin permiso clínico el texto solo filtra por paciente/documento
         words = text.lower().split()
         rows = [r for r in rows if all(w in f"{r['paciente']} {r['numero_documento'] or ''} {r['id_paciente']}".lower()
                                        for w in words)]
@@ -517,12 +545,12 @@ def search_tab() -> None:
         st.session_state.hcs_last = key
         ps.audit(clin, ctx.user_id(), "BUSQUEDA_HC", f"texto={text!r} tipo={tipo} autor={autor} desde={desde} "
                  f"hasta={hasta} resultados={len(rows)}", None, ctx.clock())
-    st.markdown(chip(f"{len(rows)} registro(s)", "neutral"), unsafe_allow_html=True)
+    patients = len({r["id_paciente"] for r in rows})
+    st.markdown(chip(f"{len(rows)} registro(s) de {patients} paciente(s)", "neutral"), unsafe_allow_html=True)
     if not rows:
         st.caption("Sin resultados con esos filtros.")
         return
-    base = [{"Fecha": _ts(r["creado_en"]), "Paciente": r["paciente"],
-             "Documento": _doc(r),
+    base = [{"Fecha": _ts(r["creado_en"]), "Paciente": r["paciente"], "Documento": _doc(r),
              "Tipo": cr.RECORD_TYPES.get(r["tipo"], r["tipo"]), "Profesional": r["autor"],
              "Estado": r["estado"].capitalize(), "Adjuntos": r["adjuntos"]} for r in rows]
     if clinical:
@@ -533,20 +561,195 @@ def search_tab() -> None:
     order = ["Fecha", "Paciente", "Documento", "Tipo", *(["Título", "Diagnóstico"] if clinical else []),
              "Profesional", "Adjuntos", "Estado"]
     event = st.dataframe(df[order], hide_index=True, width="stretch", height=min(38 * (len(df) + 1), 420),
-                         on_select="rerun" if clinical else "ignore", selection_mode="single-row", key="hcs_table")
-    if not clinical:
-        return
+                         on_select="rerun", selection_mode="multi-row", key="hcs_table")
     sel = event.selection.rows if event and event.selection else []
-    if not sel:
-        st.caption("Selecciona una fila para leer el registro completo.")
+    chosen = [rows[i] for i in sel]
+    ids = list(dict.fromkeys(r["id_paciente"] for r in chosen)) or list(dict.fromkeys(r["id_paciente"] for r in rows))
+    scope = f"{len(ids)} paciente(s) seleccionado(s)" if chosen else f"los {len(ids)} paciente(s) del resultado"
+    if ctx.can("hc.exportar"):
+        a1, a2, a3 = st.columns([1.3, 1.3, 2], vertical_alignment="center")
+        pdf_button(a1, ids, "historias_clinicas.pdf", "Descargar PDF", key=f"hcs_pdf_{hash(tuple(ids))}")
+        json_button(a2, ids, "historias_clinicas.json", key=f"hcs_json_{hash(tuple(ids))}")
+        a3.caption(f"Descarga {scope}. Marca varias filas para elegir cuáles.")
+    if not clinical or not chosen:
+        if clinical:
+            st.caption("Marca una o varias filas para leer los registros completos.")
         return
-    r = rows[sel[0]]
-    decision = gate("hc.ver_completa", r["id_paciente"], "hcs")
-    if not decision.allowed:
-        return
-    files = [dict(a) for a in cr.attachments(clin, r["id_paciente"], include_annulled=False)
-             if a["registro_id"] == r["id"]]
-    _record_card(r, files, r["id_paciente"], False)
-    if st.button("Abrir la historia completa de este paciente", icon=":material/folder_open:"):
-        st.session_state.clin_patient = r["id_paciente"]
+    for r in chosen[:5]:
+        decision = gate("hc.ver_completa" if ctx.can("hc.ver_completa") else "hc.ver_notas", r["id_paciente"],
+                        f"hcs_{r['id']}")
+        if not decision.allowed:
+            continue
+        st.markdown(f"**{esc(r['paciente'])}**", unsafe_allow_html=True)
+        allergy_banner(r["id_paciente"])
+        files = [dict(a) for a in cr.attachments(clin, r["id_paciente"], include_annulled=False)
+                 if a["registro_id"] == r["id"]]
+        _record_card(r, files, r["id_paciente"], False, prefix="hcs")
+    if len(chosen) > 5:
+        st.caption(f"Se muestran 5 de {len(chosen)}; el PDF incluye todos.")
+    if st.button("Abrir la ficha completa del primer paciente", icon=":material/folder_open:"):
+        st.session_state.clin_patient = chosen[0]["id_paciente"]
         st.toast("Paciente seleccionado: ve a la pestaña Historia clínica", icon=":material/folder_open:")
+
+
+# ===========================================================================
+# Ficha del paciente (todo en un vistazo), descargas y exportación
+# ===========================================================================
+SUMMARY_CSS = f"""
+<style>
+  .fx-allergy {{border-radius:10px; padding:0.55rem 0.8rem; margin:0.2rem 0 0.6rem; font-size:0.92rem;}}
+  .fx-allergy.bad {{background:#FEE2E2; color:#991B1B; border:1px solid #FCA5A5;}}
+  .fx-allergy.ok {{background:#ECFDF5; color:#065F46; border:1px solid #A7F3D0;}}
+  .fx-allergy.unk {{background:#FEF3C7; color:#92400E; border:1px solid #FCD34D;}}
+  .fx-grid {{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:0.55rem; margin-bottom:0.6rem;}}
+  .fx-box {{background:#FFF; border:1px solid {BORDER}; border-radius:10px; padding:0.55rem 0.7rem;}}
+  .fx-box h5 {{margin:0 0 0.2rem; font-size:0.75rem; color:{MUTED}; font-weight:650; text-transform:uppercase;
+      letter-spacing:.03em;}}
+  .fx-box div {{font-size:0.88rem; color:{TEXT}; white-space:pre-wrap;}}
+</style>
+"""
+
+
+def allergy_banner(pid: int) -> None:
+    f = cr.get_ficha(ctx.get_clin(), pid)
+    if f is not None and f["alergias"]:
+        html = f'<div class="fx-allergy bad"><b>ALERGIAS:</b> {esc(f["alergias"])}</div>'
+    elif f is not None and f["sin_alergias_conocidas"]:
+        html = '<div class="fx-allergy ok"><b>Sin alergias conocidas</b></div>'
+    else:
+        html = '<div class="fx-allergy unk"><b>Alergias sin registrar:</b> pregúntale al paciente antes de formular</div>'
+    st.markdown(SUMMARY_CSS + html, unsafe_allow_html=True)
+
+
+def summary(pid: int, can_write: bool, key: str = "hc") -> None:
+    clin = ctx.get_clin()
+    allergy_banner(pid)
+    f = cr.get_ficha(clin, pid)
+    bed = cr.current_bed(clin, pid)
+    rx = [r for r in ps.patient_prescriptions(clin, pid) if r["estado"] in ("VIGENTE", "PARCIAL")]
+    appts = [c for c in ps.patient_appointments(clin, pid) if c["estado"] == "PROGRAMADA"]
+    last = cr.records(clin, pid, include_annulled=False)[:1]
+
+    def box(title, text):
+        return f'<div class="fx-box"><h5>{esc(title)}</h5><div>{esc(text or "—")}</div></div>'
+
+    boxes = [
+        box("Grupo sanguíneo", f["grupo_sanguineo"] if f else None),
+        box("Antecedentes", "\n".join(x for x in ((f["antecedentes_personales"] if f else None),
+                                                  (f["antecedentes_quirurgicos"] if f else None)) if x)),
+        box("Medicación habitual", f["medicacion_habitual"] if f else None),
+        box("Cama actual", f"{bed['codigo_cama']} · estancia estimada {bed['dias_estimados']} días" if bed else
+            "Sin cama asignada en la app"),
+        box("Fórmulas activas", "\n".join(f"{str(r['producto']).capitalize()[:40]} ({r['dosis_entregadas']}/"
+                                          f"{r['dosis_prescritas']})" for r in rx[:3]) or "Ninguna"),
+        box("Próxima cita", f"{_ts(appts[-1]['fecha_hora'])} · {appts[-1]['especialidad'].title()}" if appts else "Ninguna"),
+        box("Último registro", f"{_ts(last[0]['creado_en'])} · {last[0]['titulo']}" if last else "Sin registros"),
+        box("Contacto de emergencia", " · ".join(x for x in ((f["contacto_emergencia"] if f else None),
+                                                           (f["telefono_emergencia"] if f else None)) if x)),
+    ]
+    st.markdown(f'<div class="fx-grid">{"".join(boxes)}</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    if ctx.can("hc.exportar") or ctx.can("portal.propio"):
+        pdf_button(c1, [pid], f"historia_clinica_{pid}.pdf", "Descargar historia (PDF)", key=f"pdf_{key}_{pid}")
+    if ctx.can("hc.exportar"):
+        json_button(c2, [pid], f"historia_clinica_{pid}.json", key=f"json_{key}_{pid}")
+    if can_write:
+        with c3.popover("Editar ficha clínica", icon=":material/edit_note:", width="stretch"):
+            _ficha_form(pid, f, key)
+
+
+def _ficha_form(pid: int, f, key: str = "hc") -> None:
+    f = dict(f) if f else {}
+    with st.form(f"ficha_{key}_{pid}"):
+        none_known = st.checkbox("Sin alergias conocidas", value=bool(f.get("sin_alergias_conocidas")))
+        alergias = st.text_input("Alergias (separa con ;)", value=f.get("alergias") or "",
+                                 placeholder="Ej.: Penicilina (urticaria); Látex", disabled=False)
+        groups = list(cr.BLOOD_GROUPS)
+        grupo = st.selectbox("Grupo sanguíneo", groups, index=groups.index(f["grupo_sanguineo"])
+                             if f.get("grupo_sanguineo") in groups else None, placeholder="Sin dato")
+        fields = {}
+        for key, label in (("antecedentes_personales", "Antecedentes personales"),
+                           ("antecedentes_quirurgicos", "Antecedentes quirúrgicos"),
+                           ("antecedentes_familiares", "Antecedentes familiares"),
+                           ("medicacion_habitual", "Medicación habitual"), ("habitos", "Hábitos"),
+                           ("observaciones", "Observaciones")):
+            fields[key] = st.text_area(label, value=f.get(key) or "", height=68)
+        c1, c2 = st.columns(2)
+        fields["contacto_emergencia"] = c1.text_input("Contacto de emergencia", value=f.get("contacto_emergencia") or "")
+        fields["telefono_emergencia"] = c2.text_input("Teléfono", value=f.get("telefono_emergencia") or "")
+        if st.form_submit_button("Guardar ficha", type="primary"):
+            if none_known and alergias.strip():
+                st.error("Marca “sin alergias conocidas” o escribe las alergias, no ambas.")
+                return
+            try:
+                changed = cr.save_ficha(ctx.get_clin(), pid, ctx.user_id(),
+                                        {**fields, "alergias": alergias, "sin_alergias_conocidas": none_known,
+                                         "grupo_sanguineo": grupo}, ctx.clock())
+                st.toast("Ficha actualizada" if changed else "Sin cambios", icon=":material/check_circle:")
+                st.rerun()
+            except sqlite3.IntegrityError as exc:
+                _err(exc)
+    st.caption("Cada cambio guarda la versión anterior (pestaña “Cambios de la ficha”).")
+
+
+def _own_conn():
+    """Conexión propia para trabajo en segundo plano (descargas diferidas corren en otro hilo)."""
+    return ps.connect(ps.CLINICAL_DB)
+
+
+def pdf_button(container, ids: list[int], filename: str, label: str, key: str) -> None:
+    user, uid, now = ctx.current_user()["nombre_mostrado"], ctx.user_id(), ctx.clock()
+
+    def build() -> bytes:
+        conn = _own_conn()
+        try:
+            data = hd.patients_pdf(conn, ids, user, now)
+            for pid in ids:
+                ps.audit(conn, uid, "DESCARGA_HC_PDF", f"{len(ids)} historia(s)", pid, now)
+            return data
+        finally:
+            conn.close()
+
+    container.download_button(label, build, filename, "application/pdf", icon=":material/picture_as_pdf:",
+                              key=key, width="stretch", on_click="ignore")
+
+
+def json_button(container, ids: list[int], filename: str, key: str, label: str = "Exportar (JSON)") -> None:
+    user, uid, now = ctx.current_user()["nombre_mostrado"], ctx.user_id(), ctx.clock()
+
+    def build() -> bytes:
+        conn = _own_conn()
+        try:
+            data = hd.export_json(conn, ids, user, now)
+            for pid in ids:
+                ps.audit(conn, uid, "EXPORTA_HC", f"{len(ids)} historia(s)", pid, now)
+            return data
+        finally:
+            conn.close()
+
+    container.download_button(label, build, filename, "application/json", icon=":material/file_export:",
+                              key=key, width="stretch", on_click="ignore")
+
+
+def import_panel() -> None:
+    with st.expander("Importar historias clínicas (JSON de otra sede o de esta app)", icon=":material/file_upload:"):
+        st.caption("Formato HSLV-HC. Los pacientes se reconocen por documento; los registros conservan autor y fecha "
+                   "originales; los adjuntos se verifican con su huella SHA-256 y no se duplican.")
+        with st.form("hc_import", clear_on_submit=True):
+            kwargs = {"type": ["json"]}
+            try:
+                up = st.file_uploader("Archivo .json", max_upload_size=20, **kwargs)
+            except TypeError:
+                up = st.file_uploader("Archivo .json", **kwargs)
+            if st.form_submit_button("Importar", type="primary", icon=":material/file_upload:") and up:
+                try:
+                    res = hd.import_json(ctx.get_clin(), up.getvalue(), ctx.user_id(), ctx.clock())
+                    ps.audit(ctx.get_clin(), ctx.user_id(), "IMPORTA_HC",
+                             f"{up.name}: {res['pacientes_nuevos']} nuevos, {res['registros']} registros", None, ctx.clock())
+                    st.success(f"Pacientes nuevos: {res['pacientes_nuevos']} · ya existentes: {res['pacientes_existentes']}"
+                               f" · registros importados: {res['registros']} (omitidos por duplicado: {res['omitidos']})"
+                               f" · adjuntos: {res['adjuntos']}")
+                    for e in res["errores"]:
+                        st.warning(e)
+                except sqlite3.IntegrityError as exc:
+                    _err(exc)

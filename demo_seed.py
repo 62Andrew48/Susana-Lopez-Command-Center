@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import clinical_records as cr
+import demo_cases
 import pharmacy_service as ps
 
 FMT = "%Y-%m-%d %H:%M:%S"
@@ -173,6 +174,8 @@ def seed(conn: sqlite3.Connection, analytics_db: Path) -> None:
         pid = presc(by_service["Pediatría"], code, "15 mg/kg (5 ml) vía oral", 6, 3, 12, "HOSPITALARIA",
                     "2026-09-21 06:00:00")
         ps.dispense(conn, pid, 3, 4, "2026-09-21 06:30:00")
+    # Casos clínicos sintéticos (pacientes con nombre, ficha, notas y laboratorios) y más usuarios del equipo
+    demo_cases.seed_cases(conn)
 
 
 def reset(clinical_db: Path, analytics_db: Path) -> sqlite3.Connection:

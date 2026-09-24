@@ -8,8 +8,12 @@ Las camas virtuales no se dibujan como camas: son la capacidad de expansión de 
 """
 from __future__ import annotations
 
+import sqlite3
+
 import streamlit as st
 
+import beds_service as bs
+import clinical_records as cr
 import database as db
 from agent import fmt_num
 from ui import context as ctx
@@ -52,12 +56,6 @@ CSS = f"""
 """
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def _beds(day_iso: str):
-    from datetime import date
-    return db.bed_map(ctx.get_conn(), date.fromisoformat(day_iso))
-
-
 def _bed_html(r, label: str) -> str:
     """Verde libre · rojo ocupada < 10 días · naranja 10 a 15 días · vino con borde más de 15 días."""
     if not r.ocupada:
@@ -70,6 +68,8 @@ def _bed_html(r, label: str) -> str:
     else:
         cls, note = "bed busy", f"menos de {SHORT_STAY_DAYS} días"
     tip = f"{r.ubicacion} · Ocupada {fmt_num(days, 0)} días ({note})"
+    if getattr(r, "paciente_app", None):
+        tip += f" · {r.paciente_app} · salida estimada {r.salida_estimada}"
     return f'<span class="{cls}" title="{esc(tip)}">{esc(label)}</span>'
 
 
@@ -144,13 +144,78 @@ def _finder(beds) -> None:
             st.caption(f"y {len(free) - 4} más")
 
 
+def _bed_label(r) -> str:
+    who = f" · {r.paciente_app}" if getattr(r, "paciente_app", None) else ""
+    return f"{r.ubicacion} ({r.codigo_cama}){who}"
+
+
+def _manage(beds) -> None:
+    """Ocupar una cama libre con un paciente y su estancia estimada, o liberarla (alta, traslado…)."""
+    clin = ctx.get_clin()
+    phys = beds[beds["es_virtual"] == 0]
+    with st.expander("Ocupar o liberar una cama", icon=":material/bed:"):
+        mode = st.segmented_control("Acción", ["Ocupar", "Liberar"], default="Ocupar", key="bed_mode")
+        units = sorted(phys["unidad"].unique())
+        unit = st.selectbox("Unidad", units, key="bed_unit",
+                            index=units.index("Hospitalización 1") if "Hospitalización 1" in units else 0)
+        in_unit = phys[phys["unidad"] == unit]
+        if mode == "Liberar":
+            busy = in_unit[in_unit["ocupada"] == 1]
+            if busy.empty:
+                st.caption("No hay camas ocupadas en esta unidad.")
+                return
+            with st.form("bed_release"):
+                labels = {r.codigo_cama: _bed_label(r) for r in busy.itertuples()}
+                code = st.selectbox("Cama", list(labels), format_func=labels.get)
+                reason = st.selectbox("Motivo", bs.RELEASE_REASONS)
+                if st.form_submit_button("Liberar cama", type="primary", icon=":material/logout:"):
+                    try:
+                        bs.release(clin, codigo_cama=code, motivo=reason, usuario_id=ctx.user_id(), cama_ocupada=True,
+                                   now=ctx.clock())
+                        st.toast(f"Cama {code} liberada", icon=":material/check_circle:")
+                        st.rerun()
+                    except sqlite3.IntegrityError as exc:
+                        st.error(str(exc))
+            return
+        free = in_unit[in_unit["ocupada"] == 0]
+        if free.empty:
+            st.caption("No hay camas libres en esta unidad.")
+            return
+        q = st.text_input("Paciente", placeholder="Nombre, documento o id", key="bed_q")
+        patients = cr.search_patients(clin, q, limit=30)
+        if not patients:
+            st.caption("No hay pacientes con ese criterio. Regístralo en Clínico y farmacia → Pacientes.")
+            return
+        with st.form("bed_occupy"):
+            labels = {r.codigo_cama: _bed_label(r) for r in free.itertuples()}
+            code = st.selectbox("Cama libre", list(labels), format_func=labels.get)
+            names = {p["id_paciente"]: f"{cr.display_name(p)} (id {p['id_paciente']})" for p in patients}
+            pid = st.selectbox("Paciente", list(names), format_func=names.get)
+            days = st.number_input("Estancia estimada (días)", 1, 90, 3,
+                                   help="Con esto se calcula la salida estimada y el color de la cama")
+            if st.form_submit_button("Ocupar cama", type="primary", icon=":material/login:"):
+                try:
+                    bs.occupy(clin, codigo_cama=code, id_paciente=int(pid), dias_estimados=int(days),
+                              usuario_id=ctx.user_id(), cama_ocupada=False, now=ctx.clock())
+                    st.toast(f"Cama {code} asignada a {names[pid]}", icon=":material/check_circle:")
+                    st.rerun()
+                except sqlite3.IntegrityError as exc:
+                    st.error(str(exc))
+        hist = bs.history(clin, 8)
+        if not hist.empty:
+            st.caption("Últimos movimientos")
+            st.dataframe(hist.rename(columns={"fecha": "Fecha", "codigo_cama": "Cama", "accion": "Acción",
+                                              "dias_estimados": "Días", "motivo": "Motivo", "usuario": "Quién",
+                                              "paciente": "Paciente"}), hide_index=True, width="stretch")
+
+
 def page_camas() -> None:
     if not ctx.can("camas.ver"):
         st.error("Tu rol no tiene acceso al mapa de camas.")
         st.stop()
     st.markdown(CSS, unsafe_allow_html=True)
     ref = ctx.ref_date()
-    beds = _beds(ref.isoformat())
+    beds = ctx.live_beds(ref.isoformat())  # censo + ocupar/liberar de la app
     inpatient = beds[beds["servicio"] != "Urgencias"]
     phys = inpatient[inpatient["es_virtual"] == 0]
     virt = inpatient[inpatient["es_virtual"] == 1]
@@ -163,6 +228,8 @@ def page_camas() -> None:
     ]) + f' <span class="muted">· datos del {ref:%d/%m/%Y}</span>', unsafe_allow_html=True)
 
     _finder(beds)
+    if ctx.can("camas.gestionar"):
+        _manage(beds)
 
     legend, toggle = st.columns([3, 1.2], vertical_alignment="center")
     legend.markdown(f'<div class="map-legend"><span><i class="sw" style="background:{EMERALD}"></i>Libre</span>'
@@ -196,7 +263,8 @@ def page_camas() -> None:
         st.markdown("- **Piso y habitación** se leen del código de cama del sistema del hospital: H-203C = piso 2, "
                     "habitación 203, cama C. Las unidades sin ese código (UCI, intermedios, observación) se "
                     "muestran por unidad.\n"
-                    "- **Estado** de cada cama: censo del día de corte de los datos.\n"
+                    "- **Estado** de cada cama: censo del día de corte de los datos, más lo que el personal ocupa o "
+                    "libera en la app (cada movimiento queda registrado con quién y cuándo).\n"
                     f"- **Colores de ocupada:** según los días que lleva el paciente en la cama. Más de "
                     f"{LONG_STAY_DAYS} días: conviene revisar el plan de salida.\n"
                     "- **Camas de expansión:** capacidad adicional que el sistema registra como “virtual”.\n"

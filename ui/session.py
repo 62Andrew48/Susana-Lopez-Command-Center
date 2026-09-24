@@ -11,14 +11,16 @@ from pathlib import Path
 import streamlit as st
 
 import auth
+import mailer
 from ui import context as ctx
 from ui.theme import BORDER, BRAND_GREEN, MUTED, NAVY, TEXT, esc
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
 LOGO, LOGO_ICON = ASSETS / "logo_hslv.png", ASSETS / "logo_hslv_icono.png"
-AVATAR_COLOR = {"ADMIN": NAVY, "DOCTOR": BRAND_GREEN, "ENFERMERIA": "#0F766E", "PACIENTE": "#7C3AED"}
+AVATAR_COLOR = {"ADMIN": NAVY, "DOCTOR": BRAND_GREEN, "ENFERMERIA": "#0F766E", "PACIENTE": "#7C3AED",
+                "FACTURACION": "#B45309"}
 DEMO_ACCOUNTS = [("admin", "Gerencia"), ("dra.ruiz", "Dra. Ruiz · Médica"), ("enf.gomez", "Enf. Gómez"),
-                 ("paciente.110", "Paciente 110")]
+                 ("facturacion.alejandro", "Facturación · Alejandro"), ("paciente.laura", "Paciente Laura"), ("paciente.110", "Paciente 110")]
 
 
 @lru_cache(maxsize=4)
@@ -64,8 +66,10 @@ def login_page() -> None:
             _do_login(user, pwd)
     if st.session_state.get("login_error"):
         st.error(st.session_state.login_error)
+    _recovery()
     with st.expander("Acceso rápido para la demostración"):
-        st.caption("Cuentas de prueba del escenario sintético (contraseña: demo). Cada ingreso queda en la bitácora.")
+        st.caption("Cuentas de prueba del escenario sintético (contraseña: demo). Cada ingreso queda en la bitácora. "
+                   "Otras: dr.paredes (pediatría), enf.castro (turno de noche).")
         cols = st.columns(2)
         for i, (username, label) in enumerate(DEMO_ACCOUNTS):
             if cols[i % 2].button(label, key=f"demo_{username}", width="stretch"):
@@ -104,3 +108,80 @@ def user_card() -> None:
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
+
+
+def _recovery() -> None:
+    """¿Olvidaste tu contraseña? Código de 6 dígitos por correo (o en pantalla si no hay SMTP)."""
+    with st.expander("¿Olvidaste tu contraseña?"):
+        step = st.session_state.get("rec_step", 1)
+        if step == 1:
+            with st.form("rec_request"):
+                ident = st.text_input("Usuario o correo")
+                if st.form_submit_button("Enviarme un código", width="stretch") and ident.strip():
+                    try:
+                        uid, code, mail = auth.request_recovery(ctx.get_clin(), ident, ctx.clock())
+                    except Exception as exc:  # límite de códigos por hora
+                        st.error(str(exc))
+                        return
+                    sent = bool(uid) and mailer.send_recovery_code(mail, code, auth.CODE_MINUTES)
+                    st.session_state.rec_ident = ident.strip()
+                    st.session_state.rec_demo_code = None if (sent or not uid) else code
+                    st.session_state.rec_step = 2
+                    st.rerun()
+            return
+        st.info("Si la cuenta existe y está activa, te enviamos un código de 6 dígitos que vence en "
+                f"{auth.CODE_MINUTES} minutos.")
+        demo = st.session_state.get("rec_demo_code")
+        if demo:
+            st.warning(f"Modo demostración (sin correo configurado): tu código es **{demo}**")
+        with st.form("rec_reset"):
+            code = st.text_input("Código", max_chars=6)
+            new = st.text_input("Nueva contraseña", type="password", help="Mínimo 8 caracteres, con letras y números")
+            again = st.text_input("Repite la contraseña", type="password")
+            if st.form_submit_button("Cambiar contraseña", type="primary", width="stretch"):
+                if new != again:
+                    st.error("Las contraseñas no coinciden.")
+                else:
+                    try:
+                        auth.reset_with_code(ctx.get_clin(), st.session_state.get("rec_ident", ""), code, new,
+                                             ctx.clock())
+                        for k in ("rec_step", "rec_ident", "rec_demo_code"):
+                            st.session_state.pop(k, None)
+                        st.success("Listo. Ya puedes ingresar con tu nueva contraseña.")
+                    except Exception as exc:
+                        st.error(str(exc))
+        if st.button("Volver", key="rec_back"):
+            for k in ("rec_step", "rec_ident", "rec_demo_code"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+
+def password_form(key: str, forced: bool = False) -> None:
+    with st.form(f"pwd_{key}"):
+        if forced:
+            st.warning("Tu contraseña es temporal: cámbiala para continuar.")
+        cur = st.text_input("Contraseña actual", type="password")
+        new = st.text_input("Nueva contraseña", type="password", help="Mínimo 8 caracteres, con letras y números")
+        again = st.text_input("Repite la nueva", type="password")
+        if st.form_submit_button("Guardar contraseña", type="primary", width="stretch"):
+            if new != again:
+                st.error("Las contraseñas no coinciden.")
+                return
+            try:
+                auth.change_password(ctx.get_clin(), ctx.user_id(), cur, new, ctx.clock())
+                st.success("Contraseña actualizada.")
+                if forced:
+                    st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+
+def forced_password_change() -> None:
+    """Primera entrada con contraseña temporal: no se muestra nada más hasta cambiarla."""
+    st.markdown(f'<div class="login-brand" style="text-align:center">{logo_html(70)}</div>', unsafe_allow_html=True)
+    st.markdown("### Cambia tu contraseña")
+    password_form("forced", forced=True)
+    if st.button("Cerrar sesión", key="forced_logout"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()

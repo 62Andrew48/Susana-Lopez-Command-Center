@@ -38,8 +38,46 @@ def page_inventario() -> None:
                           chip("Existencias iniciales simuladas · cada movimiento es real", "neutral")]),
                 unsafe_allow_html=True)
 
-    tab_stock, tab_held, tab_in, tab_count, tab_moves = st.tabs(["Existencias", "Apartados para pacientes",
-                                                                 "Llegada de pedido", "Conteo físico", "Movimientos"])
+    tab_stock, tab_held, tab_orders, tab_in, tab_count, tab_moves = st.tabs(
+        ["Existencias", "Apartados para pacientes", "Pedidos a proveedor", "Llegada de pedido", "Conteo físico",
+         "Movimientos"])
+    with tab_orders:
+        waiting = ps.backorders(clin)
+        if waiting:
+            st.warning(f"{len(waiting)} fórmula(s) esperan existencias. Lo que pidas aquí define la fecha que se le "
+                       "informa al paciente; al registrar la llegada se apartan solas.")
+            st.dataframe(pd.DataFrame([{"Ítem": w["producto"].capitalize(), "Paciente": w["paciente"],
+                                        "Unidades": w["dosis_prescritas"], "Formulada": w["fecha_prescripcion"][:16],
+                                        "Llegada estimada": w["llegada_estimada"] or "Sin pedido"} for w in waiting]),
+                         hide_index=True, width="stretch", height=min(38 * (len(waiting) + 1), 220))
+        with st.form("inv_order"):
+            names = dict(zip(inv["codigo"], inv["nombre"].str.capitalize()))
+            prefer = [w["codigo_producto"] for w in waiting] + list(red["codigo"])
+            codes = list(dict.fromkeys(prefer + list(names)))
+            code = st.selectbox("Ítem", codes, format_func=lambda c: names[c], index=None,
+                                placeholder="Escribe para buscar (primero los que esperan pacientes y los urgentes)")
+            c1, c2, c3 = st.columns(3)
+            qty = c1.number_input("Unidades pedidas", min_value=1, value=50, step=1)
+            from datetime import date, timedelta
+            today = date.fromisoformat(ctx.clock()[:10])
+            eta = c2.date_input("Llegada estimada", value=today + timedelta(days=3), min_value=today, format="DD/MM/YYYY")
+            supplier = c3.text_input("Proveedor")
+            if st.form_submit_button("Registrar pedido", type="primary", icon=":material/local_shipping:") and code:
+                try:
+                    ps.create_order(clin, code, int(qty), eta.isoformat(), ctx.user_id(), supplier, ctx.clock())
+                    st.toast(f"Pedido registrado: llega el {eta:%d/%m/%Y}", icon=":material/local_shipping:")
+                    st.rerun()
+                except sqlite3.IntegrityError as exc:
+                    st.error(str(exc))
+        orders = ps.open_orders(clin)
+        if orders:
+            st.dataframe(pd.DataFrame([{"Ítem": o["producto"].capitalize(), "Unidades": o["cantidad"],
+                                        "Proveedor": o["proveedor"] or "—", "Pedido": o["fecha_pedido"][:10],
+                                        "Llegada estimada": o["fecha_estimada_llegada"],
+                                        "Pacientes esperando": o["pacientes_esperando"]} for o in orders]),
+                         hide_index=True, width="stretch")
+        else:
+            st.caption("No hay pedidos en camino.")
     with tab_held:
         held = ps.reservations(clin)
         st.caption(f"Unidades formuladas que esperan a que el paciente las reclame. No están en “Quedan”: están "
@@ -91,8 +129,10 @@ def page_inventario() -> None:
             qty = st.number_input("Unidades recibidas", min_value=1, value=max(suggested, 1), step=1)
             note = st.text_input("Proveedor o número de factura (opcional)")
             if st.form_submit_button("Registrar llegada", type="primary") and code:
-                ps.receive_stock(clin, code, int(qty), ctx.user_id(), note, ctx.clock())
-                st.toast(f"Sumadas {int(qty)} und. a {names[code]}", icon=":material/check_circle:")
+                done = ps.receive_stock(clin, code, int(qty), ctx.user_id(), note, ctx.clock())
+                st.toast(f"Sumadas {int(qty)} und. a {names[code]}"
+                         + (f" · {len(done)} fórmula(s) en espera quedaron apartadas" if done else ""),
+                         icon=":material/check_circle:")
                 st.rerun()
 
     with tab_count:

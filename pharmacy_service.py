@@ -23,7 +23,7 @@ CLINICAL_DB = BASE_DIR / "clinico.db"
 # Grupos ATC cuya suspensión abrupta es riesgosa: no se bloquean, se alertan
 CONTINUITY_ATC_PREFIXES = ("A10A", "B01A", "N03A", "J05A", "H02AB", "C01AA", "L04A")
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
-SCHEMA_VERSION = 2          # debe coincidir con el PRAGMA user_version del final de schema_clinico.sql
+SCHEMA_VERSION = 6          # debe coincidir con el PRAGMA user_version del final de schema_clinico.sql
 RESERVE_DAYS = 30           # las unidades formuladas quedan apartadas para el paciente durante 30 días
 RESERVE_HOURS = RESERVE_DAYS * 24
 
@@ -46,11 +46,12 @@ def init_clinical_db(analytics_db: Path | str, path: Path | str = CLINICAL_DB) -
     path = Path(path)
     if path.exists():
         conn = connect(path)
-        if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+        found = conn.execute("PRAGMA user_version").fetchone()[0]
+        if found == SCHEMA_VERSION:
             return conn
         # Base de una versión anterior: se guarda un respaldo y se recrea (es la base de la demo).
         conn.close()
-        backup = path.with_name(f"{path.stem}_respaldo_v{SCHEMA_VERSION - 1}{path.suffix}")
+        backup = path.with_name(f"{path.stem}_respaldo_v{found}{path.suffix}")
         try:
             backup.unlink(missing_ok=True)
             path.rename(backup)
@@ -219,7 +220,10 @@ def patient_prescriptions(conn: sqlite3.Connection, id_paciente: int) -> list[sq
     return conn.execute("""
         SELECT p.id, f.nombre AS producto, p.codigo_producto, p.dosis, p.frecuencia_horas, p.duracion_dias,
                p.dosis_prescritas, p.dosis_entregadas, p.ambito, p.fecha_prescripcion, p.fecha_limite_reclamo,
-               p.estado, p.requiere_reevaluacion, f.critico_continuidad, u.nombre_mostrado AS medico
+               p.estado, p.requiere_reevaluacion, f.critico_continuidad, u.nombre_mostrado AS medico,
+               p.fecha_apartado,
+               (SELECT MIN(o.fecha_estimada_llegada) FROM pedidos_compra o WHERE o.codigo_producto = p.codigo_producto
+                   AND o.estado = 'EN_CAMINO') AS llegada_estimada
           FROM prescripciones p JOIN productos_farmacia f ON f.codigo = p.codigo_producto
           JOIN usuarios u ON u.id = p.medico_id
          WHERE p.id_paciente = ? ORDER BY p.fecha_prescripcion DESC""", (id_paciente,)).fetchall()
@@ -248,13 +252,17 @@ def prescribe(conn: sqlite3.Connection, *, medico_id: int, id_paciente: int, cod
         raise sqlite3.IntegrityError("El paciente no tiene historia clínica abierta")
     oid = conn.execute("SELECT oid_ingreso FROM historia_clinica_eventos WHERE historia_id = ? "
                        "AND oid_ingreso IS NOT NULL ORDER BY fecha DESC LIMIT 1", (hc["id"],)).fetchone()
+    # Ambulatoria sin existencias suficientes: no se rechaza; queda en espera y se aparta al llegar el pedido
+    available = conn.execute("SELECT disponible FROM v_stock WHERE codigo = ?", (codigo,)).fetchone()
+    state = ("PENDIENTE_STOCK" if ambito == "AMBULATORIA" and (available is None or available[0] < dosis_prescritas)
+             else "VIGENTE")
     with conn:
         cur = conn.execute(
             "INSERT INTO prescripciones(historia_id, id_paciente, oid_ingreso, medico_id, codigo_producto, dosis, "
-            "frecuencia_horas, duracion_dias, dosis_prescritas, ambito, fecha_prescripcion, horas_ventana_reclamo) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "frecuencia_horas, duracion_dias, dosis_prescritas, ambito, fecha_prescripcion, horas_ventana_reclamo, "
+            "estado) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (hc["id"], id_paciente, oid["oid_ingreso"] if oid else None, medico_id, codigo, dosis,
-             frecuencia_horas, duracion_dias, dosis_prescritas, ambito, ts, horas_ventana))
+             frecuencia_horas, duracion_dias, dosis_prescritas, ambito, ts, horas_ventana, state))
     return cur.lastrowid
 
 
@@ -365,14 +373,82 @@ def inventory(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def receive_stock(conn: sqlite3.Connection, codigo: str, cantidad: int, usuario_id: int, nota: str = "",
-                  now: datetime | str | None = None) -> None:
-    """Llegada de un pedido: suma unidades disponibles (ENTRADA_COMPRA)."""
+                  now: datetime | str | None = None) -> list[int]:
+    """Llegada de un pedido: suma unidades disponibles (ENTRADA_COMPRA), cierra el pedido en camino más antiguo
+    y aparta las fórmulas que esperaban este producto. Devuelve las fórmulas apartadas."""
     if cantidad <= 0:
         raise sqlite3.IntegrityError("La cantidad recibida debe ser mayor que cero")
+    ts = _now(now)
     with conn:
         conn.execute("INSERT INTO inventario_movimientos(codigo_producto, tipo, delta_disponible, delta_reservado, "
                      "usuario_id, nota, fecha) VALUES (?, 'ENTRADA_COMPRA', ?, 0, ?, ?, ?)",
-                     (codigo, int(cantidad), usuario_id, nota or "Llegada de pedido", _now(now)))
+                     (codigo, int(cantidad), usuario_id, nota or "Llegada de pedido", ts))
+        order = conn.execute("SELECT id FROM pedidos_compra WHERE codigo_producto = ? AND estado = 'EN_CAMINO' "
+                             "ORDER BY fecha_estimada_llegada, id LIMIT 1", (codigo,)).fetchone()
+        if order:
+            conn.execute("UPDATE pedidos_compra SET estado = 'RECIBIDO', fecha_recibido = ? WHERE id = ?",
+                         (ts, order[0]))
+    return allocate_backorders(conn, codigo, ts)
+
+
+def allocate_backorders(conn: sqlite3.Connection, codigo: str, now: datetime | str | None = None) -> list[int]:
+    """Aparta las fórmulas en espera de este producto, en orden de llegada, mientras alcance el stock.
+    Cada una pasa a VIGENTE y su plazo de 30 días empieza ahora (trigger R2c)."""
+    ts = _now(now)
+    done = []
+    with conn:
+        for row in conn.execute("SELECT id, dosis_prescritas FROM prescripciones WHERE codigo_producto = ? "
+                                "AND estado = 'PENDIENTE_STOCK' ORDER BY fecha_prescripcion, id", (codigo,)).fetchall():
+            free = conn.execute("SELECT disponible FROM v_stock WHERE codigo = ?", (codigo,)).fetchone()[0]
+            if free < row["dosis_prescritas"]:
+                break  # FIFO estricto: no se salta a quien llegó primero
+            conn.execute("UPDATE prescripciones SET estado = 'VIGENTE', fecha_apartado = ? WHERE id = ?", (ts, row["id"]))
+            done.append(row["id"])
+    return done
+
+
+def create_order(conn: sqlite3.Connection, codigo: str, cantidad: int, fecha_estimada: str, usuario_id: int,
+                 proveedor: str = "", now: datetime | str | None = None) -> int:
+    """Pedido a proveedor en camino: su fecha estimada es la que se le informa al paciente."""
+    if cantidad <= 0:
+        raise sqlite3.IntegrityError("La cantidad pedida debe ser mayor que cero")
+    ts = _now(now)
+    if fecha_estimada < ts[:10]:
+        raise sqlite3.IntegrityError("La fecha estimada de llegada no puede ser anterior a hoy")
+    with conn:
+        return conn.execute("INSERT INTO pedidos_compra(codigo_producto, cantidad, proveedor, fecha_pedido, "
+                            "fecha_estimada_llegada, creado_por) VALUES (?,?,?,?,?,?)",
+                            (codigo, int(cantidad), proveedor.strip() or None, ts, fecha_estimada, usuario_id)).lastrowid
+
+
+def open_orders(conn: sqlite3.Connection, codigo: str | None = None) -> list[sqlite3.Row]:
+    where, args = ("AND o.codigo_producto = ?", [codigo]) if codigo else ("", [])
+    return conn.execute(f"""
+        SELECT o.*, f.nombre AS producto,
+               (SELECT COUNT(*) FROM prescripciones p WHERE p.codigo_producto = o.codigo_producto
+                   AND p.estado = 'PENDIENTE_STOCK') AS pacientes_esperando
+          FROM pedidos_compra o JOIN productos_farmacia f ON f.codigo = o.codigo_producto
+         WHERE o.estado = 'EN_CAMINO' {where} ORDER BY o.fecha_estimada_llegada""", args).fetchall()
+
+
+def expected_arrival(conn: sqlite3.Connection, codigo: str) -> str | None:
+    row = conn.execute("SELECT MIN(fecha_estimada_llegada) FROM pedidos_compra WHERE codigo_producto = ? "
+                       "AND estado = 'EN_CAMINO'", (codigo,)).fetchone()
+    return row[0] if row else None
+
+
+def backorders(conn: sqlite3.Connection, codigo: str | None = None) -> list[sqlite3.Row]:
+    """Fórmulas en espera de existencias, con la fecha estimada de llegada del pedido (si lo hay)."""
+    where, args = ("AND p.codigo_producto = ?", [codigo]) if codigo else ("", [])
+    return conn.execute(f"""
+        SELECT p.id, p.id_paciente, p.codigo_producto, f.nombre AS producto, p.dosis_prescritas, p.fecha_prescripcion,
+               u.nombre_mostrado AS medico,
+               COALESCE(NULLIF(trim(pc.nombres || ' ' || pc.apellidos), ''), 'Paciente ' || p.id_paciente) AS paciente,
+               (SELECT MIN(o.fecha_estimada_llegada) FROM pedidos_compra o WHERE o.codigo_producto = p.codigo_producto
+                   AND o.estado = 'EN_CAMINO') AS llegada_estimada
+          FROM prescripciones p JOIN productos_farmacia f ON f.codigo = p.codigo_producto
+          JOIN usuarios u ON u.id = p.medico_id LEFT JOIN pacientes_clinicos pc ON pc.id_paciente = p.id_paciente
+         WHERE p.estado = 'PENDIENTE_STOCK' {where} ORDER BY p.fecha_prescripcion""", args).fetchall()
 
 
 def adjust_stock(conn: sqlite3.Connection, codigo: str, conteo_fisico: int, usuario_id: int, motivo: str,

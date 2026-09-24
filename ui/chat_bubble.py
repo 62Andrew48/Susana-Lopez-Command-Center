@@ -86,7 +86,10 @@ def _bed_answer(question: str) -> AgentResponse | None:
         return None
     pop = next((p for w, p in _POP_WORDS if w in q), None)
     floor = re.search(r"piso\s*(\d)", q)
-    beds = db.free_beds(ctx.get_conn(), ctx.ref_date(), population=pop, limit=500)
+    beds = ctx.live_beds()
+    beds = beds[(beds["ocupada"] == 0) & (beds["es_virtual"] == 0) & (beds["servicio"] != "Urgencias")]
+    if pop:
+        beds = beds[beds["poblacion"] == pop]
     if floor:
         beds = beds[beds["piso"] == int(floor.group(1))]
     who = f"para población {pop.lower()}" if pop else "de internación"

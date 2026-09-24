@@ -165,6 +165,14 @@ def _patient(clin: sqlite3.Connection, id_paciente: int, now: str) -> list[Notif
                                         "alta" if left < 24 else "media" if left < 72 else "info",
                                         "Reclama tu medicamento", f"{name} · está apartado para ti hasta el "
                                         f"{_dt(r['fecha_limite_reclamo']):%d/%m a las %H:%M}", "portal", "Ver fórmula"))
+        elif r["estado"] == "PENDIENTE_STOCK":
+            eta = clin.execute("SELECT MIN(fecha_estimada_llegada) FROM pedidos_compra WHERE estado = 'EN_CAMINO' "
+                               "AND codigo_producto = (SELECT codigo_producto FROM prescripciones WHERE id = ?)",
+                               (r["id"],)).fetchone()[0]
+            out.append(Notification(f"pac_espera:{r['id']}:{eta}", "info", "Tu medicamento está en camino",
+                                    f"{name} · hoy no hay existencias"
+                                    + (f"; llegada estimada {_dt(eta + ' 00:00:00'):%d/%m}" if eta else "")
+                                    + ". Al llegar queda apartado para ti 30 días.", "portal", "Ver fórmula"))
         elif r["estado"] == "CADUCADA" and r["requiere_reevaluacion"]:
             has_appt = clin.execute("SELECT 1 FROM citas WHERE prescripcion_origen_id = ? AND estado = 'PROGRAMADA'",
                                     (r["id"],)).fetchone()
@@ -182,13 +190,31 @@ def _patient(clin: sqlite3.Connection, id_paciente: int, now: str) -> list[Notif
     return out
 
 
+def _backorders(clin: sqlite3.Connection) -> list[Notification]:
+    rows = clin.execute("""
+        SELECT p.codigo_producto, f.nombre, COUNT(*) AS n,
+               (SELECT COUNT(*) FROM pedidos_compra o WHERE o.codigo_producto = p.codigo_producto
+                   AND o.estado = 'EN_CAMINO') AS pedidos
+          FROM prescripciones p JOIN productos_farmacia f ON f.codigo = p.codigo_producto
+         WHERE p.estado = 'PENDIENTE_STOCK' GROUP BY p.codigo_producto""").fetchall()
+    out = []
+    for r in rows:
+        no_order = not r["pedidos"]
+        out.append(Notification(f"espera:{r['codigo_producto']}:{r['n']}:{r['pedidos']}", "alta" if no_order else "media",
+                                _n(r["n"], "paciente espera", "pacientes esperan") + f" {str(r['nombre']).capitalize()[:40]}",
+                                "Sin pedido registrado: pídelo para darle fecha al paciente." if no_order
+                                else "Pedido en camino: se apartará al registrar la llegada.", "inventario",
+                                "Pedidos"))
+    return out
+
+
 def collect(role: str, user: dict, clin: sqlite3.Connection, analytics: sqlite3.Connection, now: str,
             alerts: list) -> list[Notification]:
     """Notificaciones del usuario, ordenadas por severidad. Cada rol ve solo lo que puede atender."""
     to_beds = {"Ocupación": "camas", "Farmacia": "alertas"}
     if role == "ADMIN":
         items = (_hospital(alerts, {"Ocupación", "Farmacia", "Urgencias", "Demanda", "Cirugías"}, to_beds, clin)
-                 + _triage(analytics, now) + _admin_audit(clin))
+                 + _triage(analytics, now) + _admin_audit(clin) + _backorders(clin))
     elif role == "DOCTOR":
         items = _doctor(clin, user["id"]) + _triage(analytics, now) + _hospital(alerts, {"Ocupación"}, to_beds)
     elif role == "ENFERMERIA":

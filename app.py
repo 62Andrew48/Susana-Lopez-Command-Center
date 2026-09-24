@@ -27,13 +27,15 @@ from ui import chat_bubble as cb
 from ui import context as ctx
 from ui import notifications as nt
 from ui import pages_analytics as pa
+from ui import pages_atencion as pat
 from ui import pages_camas as pm
 from ui import pages_clinical as pc
 from ui import pages_hoy as ph
 from ui import pages_inventario as pi
+from ui import pages_personal as pper
 from ui import pages_predicciones as pp
 from ui import session as ss
-from ui.theme import chip, inject_css
+from ui.theme import chip, inject_css, inject_dark
 
 st.set_page_config(page_title="HSLV · Centro de mando", page_icon=str(ss.LOGO_ICON), layout="wide")
 inject_css()
@@ -58,7 +60,21 @@ def _clock_label() -> str:
 # ---------------------------------------------------------------------------
 # Cabecera: marca, notificaciones y reloj de la demostración
 # ---------------------------------------------------------------------------
-brand, bell_col, clock_col = st.columns([4, 0.55, 0.9], vertical_alignment="center")
+user = ctx.current_user()
+if user.get("debe_cambiar_clave"):
+    ss.forced_password_change()
+    st.stop()
+dark = user.get("preferencia_tema") == "oscuro"
+inject_dark(dark)
+brand, settings_col, bell_col, clock_col = st.columns([4, 0.45, 0.55, 0.9], vertical_alignment="center")
+with settings_col.popover("", icon=":material/settings:", help="Ajustes", width="stretch"):
+    st.markdown("**Ajustes**")
+    if st.toggle("Modo oscuro (cuidado de la vista)", value=dark, key="theme_toggle") != dark:
+        ctx.set_theme("claro" if dark else "oscuro")
+        st.rerun()
+    st.divider()
+    st.markdown("**Cambiar contraseña**")
+    ss.password_form("settings")
 brand.markdown(f'<div class="brand">{ss.logo_html(46)}<div><h1>Hospital Susana López de Valencia</h1>'
                '<p>Centro de mando · E.S.E. Popayán</p></div></div>', unsafe_allow_html=True)
 
@@ -78,7 +94,6 @@ with clock_col.popover(f":material/schedule: {datetime.strptime(ctx.clock(), '%Y
         ctx.reset_clinical_demo()
         st.rerun()
 
-user = ctx.current_user()
 active = [k for k in st.session_state.get("emergency", {}) if k[0] == user["id"]]
 if active:
     st.markdown(chip(f"Acceso de emergencia activo ({len(active)})", "danger"), unsafe_allow_html=True)
@@ -95,10 +110,14 @@ CATALOG = [  # grupo del menú, slug, título, icono, página, permisos que la h
     ("Clínico", "clinico", "Clínico y farmacia", ":material/stethoscope:", pc.page_clinico,
      {"hc.ver_notas", "hc.ver_completa", "prescripcion.crear", "dispensacion.registrar", "pacientes.registrar",
       "hc.buscar"}),
+    ("Clínico", "atencion", "Citas y turnos", ":material/event:", pat.page_atencion,
+     {"citas.gestionar", "citas.agenda", "turnos_atencion.gestionar"}),
     ("Clínico", "portal", "Mis fórmulas y citas", ":material/person:", pc.page_portal, {"portal.propio"}),
     ("Gestión", "tablero", "Indicadores", ":material/bar_chart:", pa.page_tablero, {"tablero.gerencial.ver", "camas.ver"}),
     ("Gestión", "predicciones", "Pronósticos", ":material/trending_up:", pp.page_predicciones, {"tablero.gerencial.ver"}),
     ("Gestión", "asistente", "Asistente IA", ":material/forum:", pa.page_asistente, {"agente.consultar"}),
+    ("Gestión", "personal", "Personal y turnos", ":material/badge:", pper.page_personal,
+     {"usuarios.administrar", "personal.turnos"}),
     ("Gestión", "datos", "Datos y auditoría", ":material/folder_managed:", pa.page_datos, {"auditoria.ver"}),
 ]
 sections: dict[str, list] = {}

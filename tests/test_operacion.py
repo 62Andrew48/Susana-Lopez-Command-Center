@@ -287,3 +287,19 @@ def test_physical_trend_matches_bed_map(conn):
     assert last["camas_ocupadas"].sum() == phys["ocupada"].sum()
     assert last["capacidad"].sum() == len(phys)
     assert trend["fecha"].nunique() == 8
+
+
+def test_wait_root_cause_decomposes_the_change(conn):
+    import database as db
+    rc = db.wait_root_cause(conn)
+    assert rc["antes"] and rc["ahora"] and rc["factores"]
+    # los aportes de todos los grupos suman el cambio del promedio (descomposición exacta)
+    assert abs(sum(f["aporte_min"] for f in rc["factores"])) <= abs(rc["cambio"]) + 1
+    text = db.explain_wait_change(rc)
+    assert "Triage" in text and "turno" in text
+
+
+def test_agent_explains_why_wait_changed(conn):
+    from agent import HospitalAgent
+    resp = HospitalAgent(provider="none", mode="rules").ask("¿Por qué cambió la espera en urgencias?")
+    assert "Lo que más lo explica" in resp.answer

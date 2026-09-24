@@ -179,3 +179,22 @@ def authorize_once(permission: str, id_paciente: int | None = None, justificatio
     if key not in cache:
         cache[key] = ps.authorize(get_clin(), user_id(), permission, id_paciente, justification, clock())
     return cache[key]
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _census(day_iso: str):
+    from datetime import date
+    return db.bed_map(get_conn(), date.fromisoformat(day_iso))
+
+
+def live_beds(day_iso: str | None = None):
+    """Censo de camas del día de corte (en caché) + lo que el personal ocupó o liberó en la app."""
+    import beds_service as bs
+    return bs.apply(_census(day_iso or ref_date().isoformat()), get_clin(), clock())
+
+
+def set_theme(theme: str) -> None:
+    """Guarda la preferencia claro/oscuro del usuario (se recuerda en su próximo inicio de sesión)."""
+    clin = get_clin()
+    with clin:
+        clin.execute("UPDATE usuarios SET preferencia_tema = ? WHERE id = ?", (theme, user_id()))

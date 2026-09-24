@@ -133,7 +133,7 @@ def test_ledger_and_audit_are_immutable(db):
     (2, "hc.ver_completa", 110, "2026-09-21 23:00:00", None, False),       # fuera de turno
     (2, "hc.ver_completa", 110, "2026-09-21 23:00:00", "Paro en urgencias", True),  # romper el vidrio
     (5, "hc.ver_completa", 110, "2026-09-21 10:00:00", None, False),       # cuenta suspendida
-    (1, "hc.ver_completa", 110, "2026-09-21 10:00:00", None, False),       # admin no lee HC
+    (1, "hc.ver_completa", 110, "2026-09-21 10:00:00", None, True),        # admin lee (auditado), no escribe
     (1, "auditoria.ver", None, "2026-09-21 10:00:00", None, True),
     (3, "prescripcion.crear", 110, "2026-09-21 10:00:00", None, False),    # enfermería no formula
     (3, "dispensacion.registrar", 110, "2026-09-21 10:00:00", None, True),

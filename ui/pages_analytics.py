@@ -231,6 +231,10 @@ def _admissions_list(start, end) -> None:
 
 
 def _emergency_section(start, end) -> None:
+    rc = ctx.cached("wait_root_cause")
+    with st.container(border=True):
+        st.markdown("**¿Por qué cambió la espera?** · última semana frente a las 4 anteriores")
+        st.markdown(db.explain_wait_change(rc))
     waits = ctx.cached("kpi_wait_times", start, end)
     bt, heat = waits["por_triage"], waits["por_turno_triage"]
     t2 = bt.query("triage == 'Triage 2'")

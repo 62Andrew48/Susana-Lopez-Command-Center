@@ -909,3 +909,57 @@ if __name__ == "__main__":
         summary = compute_kpis(c)
         log.info("Ocupación global: %s", summary["ocupacion_global"])
         log.info("Espera urgencias (mes): %s", summary["espera_urgencias"])
+
+
+def wait_root_cause(conn, ref: date | None = None, recent_days: int = 7, base_days: int = 28) -> dict:
+    """¿Por qué cambió la espera en urgencias? Compara la última semana con las 4 anteriores por turno y triage y
+    reparte el cambio del promedio entre los grupos: aporte_i = (participación nueva × espera nueva) −
+    (participación anterior × espera anterior). Positivo = empuja la espera hacia arriba."""
+    ref = ref or get_reference_date(conn)
+    r0, r1 = ref - timedelta(days=recent_days - 1), ref
+    b1 = r0 - timedelta(days=1)
+    b0 = b1 - timedelta(days=base_days - 1)
+
+    def seg(start, end):
+        lo, hi = day_bounds(start, end)
+        return query_df(conn, """
+            SELECT turno, COALESCE('Triage ' || nivel_triage, 'Sin triage') AS triage, COUNT(*) AS n,
+                   AVG(tiempo_espera_min) AS espera
+              FROM ingresos WHERE via_ingreso = 'Urgencias' AND espera_valida = 1 AND fecha_ingreso BETWEEN ? AND ?
+             GROUP BY 1, 2""", (lo, hi))
+
+    new, old = seg(r0, r1), seg(b0, b1)
+    if new.empty or old.empty:
+        return {"antes": None, "ahora": None, "cambio": None, "factores": []}
+    m = new.merge(old, on=["turno", "triage"], how="outer", suffixes=("_n", "_o")).fillna(0)
+    tn, to = m["n_n"].sum(), m["n_o"].sum()
+    m["aporte"] = m["n_n"] / tn * m["espera_n"] - m["n_o"] / to * m["espera_o"]
+    m["diarios_n"], m["diarios_o"] = m["n_n"] / recent_days, m["n_o"] / base_days
+    now_avg = float((new["n"] * new["espera"]).sum() / new["n"].sum())
+    old_avg = float((old["n"] * old["espera"]).sum() / old["n"].sum())
+    top = m.sort_values("aporte", ascending=now_avg < old_avg).head(3)
+    factors = [{"turno": r.turno, "triage": r.triage, "aporte_min": round(float(r.aporte), 1),
+                "espera_antes": round(float(r.espera_o), 1), "espera_ahora": round(float(r.espera_n), 1),
+                "diarios_antes": round(float(r.diarios_o), 1), "diarios_ahora": round(float(r.diarios_n), 1)}
+               for r in top.itertuples() if (r.aporte > 0) == (now_avg >= old_avg)]
+    return {"antes": round(old_avg, 1), "ahora": round(now_avg, 1), "cambio": round(now_avg - old_avg, 1),
+            "periodo": f"{r0:%d/%m}–{r1:%d/%m} frente a {b0:%d/%m}–{b1:%d/%m}", "factores": factors}
+
+
+def explain_wait_change(rc: dict) -> str:
+    """Texto en markdown: cambio del promedio y los grupos (turno × triage) que más lo explican."""
+    if rc.get("cambio") is None:
+        return "No hay suficientes datos para comparar la espera."
+    up = rc["cambio"] >= 0
+    text = (f"La espera promedio en urgencias **{'subió' if up else 'bajó'} de {rc['antes']:.0f} a {rc['ahora']:.0f} "
+            f"min** ({rc['periodo']}). Lo que más lo explica:")
+    for f in rc["factores"]:
+        why = []
+        if abs(f["diarios_ahora"] - f["diarios_antes"]) >= 0.5:
+            why.append(f"{'más' if f['diarios_ahora'] > f['diarios_antes'] else 'menos'} pacientes por día "
+                       f"({f['diarios_antes']:.0f} → {f['diarios_ahora']:.0f})")
+        if abs(f["espera_ahora"] - f["espera_antes"]) >= 3:
+            why.append(f"espera de {f['espera_antes']:.0f} → {f['espera_ahora']:.0f} min")
+        text += (f"\n- **{f['triage']} · turno de la {f['turno'].lower()}**: {', '.join(why) or 'cambio en la mezcla'}"
+                 f" (aporta {f['aporte_min']:+.1f} min al promedio)")
+    return text

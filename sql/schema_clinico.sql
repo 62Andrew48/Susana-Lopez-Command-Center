@@ -17,7 +17,7 @@ PRAGMA journal_mode = WAL;          -- lecturas concurrentes mientras se escribe
 -- -----------------------------------------------------------------------------
 CREATE TABLE roles (
     id          INTEGER PRIMARY KEY,
-    codigo      TEXT NOT NULL UNIQUE CHECK (codigo IN ('ADMIN','DOCTOR','ENFERMERIA','PACIENTE')),
+    codigo      TEXT NOT NULL UNIQUE CHECK (codigo IN ('ADMIN','DOCTOR','ENFERMERIA','PACIENTE','FACTURACION')),
     nombre      TEXT NOT NULL
 );
 
@@ -49,7 +49,10 @@ CREATE TABLE usuarios (
     intentos_fallidos     INTEGER NOT NULL DEFAULT 0,
     bloqueado_hasta       TEXT,
     creado_en             TEXT NOT NULL DEFAULT (datetime('now')),
-    ultimo_acceso         TEXT
+    ultimo_acceso         TEXT,
+    correo                TEXT,                          -- para recuperar la contraseña
+    preferencia_tema      TEXT NOT NULL DEFAULT 'claro' CHECK (preferencia_tema IN ('claro','oscuro')),
+    debe_cambiar_clave    INTEGER NOT NULL DEFAULT 0 CHECK (debe_cambiar_clave IN (0,1))
 );
 CREATE UNIQUE INDEX ux_usuario_paciente ON usuarios(id_paciente) WHERE id_paciente IS NOT NULL;
 
@@ -137,9 +140,15 @@ CREATE TABLE citas (
     prescripcion_origen_id  INTEGER REFERENCES prescripciones(id),
     estado                  TEXT NOT NULL DEFAULT 'PROGRAMADA'
                             CHECK (estado IN ('PROGRAMADA','CUMPLIDA','CANCELADA','NO_ASISTIO')),
-    creada_en               TEXT NOT NULL DEFAULT (datetime('now'))
+    creada_en               TEXT NOT NULL DEFAULT (datetime('now')),
+    nota                    TEXT,                           -- motivo que escribe el paciente o admisiones
+    creada_por              INTEGER REFERENCES usuarios(id),
+    motivo_cancelacion      TEXT
 );
 CREATE INDEX ix_citas_paciente ON citas(id_paciente, fecha_hora);
+-- Un médico no puede tener dos citas programadas a la misma hora (nada de doble agenda)
+CREATE UNIQUE INDEX ux_citas_medico_hora ON citas(medico_id, fecha_hora)
+    WHERE estado = 'PROGRAMADA' AND medico_id IS NOT NULL;
 
 -- Catálogo sincronizado desde hospital.db (inventario_farmacia): el consumo histórico es real
 CREATE TABLE productos_farmacia (
@@ -171,10 +180,14 @@ CREATE TABLE prescripciones (
     -- Las unidades quedan APARTADAS para el paciente durante la ventana (30 días por defecto); si no las
     -- reclama, el job de caducidad las devuelve a disponibles (trigger R4).
     horas_ventana_reclamo  INTEGER NOT NULL DEFAULT 720 CHECK (horas_ventana_reclamo BETWEEN 24 AND 720),
+    -- Sin existencias al formular: queda PENDIENTE_STOCK y se aparta cuando llega el pedido (fecha_apartado);
+    -- los 30 días para reclamar cuentan desde que se aparta, no desde que se formuló.
+    fecha_apartado         TEXT,
     fecha_limite_reclamo   TEXT GENERATED ALWAYS AS
-                           (datetime(fecha_prescripcion, '+' || horas_ventana_reclamo || ' hours')) STORED,
+                           (datetime(COALESCE(fecha_apartado, fecha_prescripcion),
+                                     '+' || horas_ventana_reclamo || ' hours')) STORED,
     estado                 TEXT NOT NULL DEFAULT 'VIGENTE'
-                           CHECK (estado IN ('VIGENTE','PARCIAL','ENTREGADA','CADUCADA','ANULADA')),
+                           CHECK (estado IN ('PENDIENTE_STOCK','VIGENTE','PARCIAL','ENTREGADA','CADUCADA','ANULADA')),
     requiere_reevaluacion  INTEGER NOT NULL DEFAULT 0 CHECK (requiere_reevaluacion IN (0,1)),
     CHECK (dosis_entregadas BETWEEN 0 AND dosis_prescritas)
 );
@@ -255,7 +268,7 @@ END;
 
 -- R2. Al formular (ambulatoria): reservar unidades si hay stock disponible
 CREATE TRIGGER trg_presc_reserva AFTER INSERT ON prescripciones
-WHEN NEW.ambito = 'AMBULATORIA'
+WHEN NEW.ambito = 'AMBULATORIA' AND NEW.estado <> 'PENDIENTE_STOCK'
 BEGIN
     SELECT CASE WHEN (SELECT disponible FROM v_stock WHERE codigo = NEW.codigo_producto) < NEW.dosis_prescritas
                 THEN RAISE(ABORT, 'Stock disponible insuficiente para reservar la fórmula') END;
@@ -271,10 +284,56 @@ BEGIN
             NEW.fecha_limite_reclamo, NEW.medico_id, NEW.fecha_prescripcion);
 END;
 
+-- R2b. Formulado sin existencias: queda en espera y se deja constancia en la HC
+CREATE TRIGGER trg_presc_pendiente AFTER INSERT ON prescripciones
+WHEN NEW.estado = 'PENDIENTE_STOCK'
+BEGIN
+    INSERT INTO historia_clinica_eventos(historia_id, oid_ingreso, tipo, descripcion, autor_id, fecha)
+    VALUES (NEW.historia_id, NEW.oid_ingreso, 'PRESCRIPCION',
+            'Formula ' || NEW.dosis_prescritas || ' dosis de ' ||
+            (SELECT nombre FROM productos_farmacia WHERE codigo = NEW.codigo_producto) ||
+            ' SIN EXISTENCIAS: queda en espera y se aparta para el paciente cuando llegue el pedido',
+            NEW.medico_id, NEW.fecha_prescripcion);
+END;
+
+-- R2c. Llegó el pedido: la fórmula en espera pasa a VIGENTE, se apartan las unidades y corre el plazo de 30 días
+CREATE TRIGGER trg_presc_llego_stock AFTER UPDATE OF estado ON prescripciones
+WHEN OLD.estado = 'PENDIENTE_STOCK' AND NEW.estado = 'VIGENTE'
+BEGIN
+    SELECT CASE WHEN (SELECT disponible FROM v_stock WHERE codigo = NEW.codigo_producto) < NEW.dosis_prescritas
+                THEN RAISE(ABORT, 'Stock disponible insuficiente para apartar la fórmula en espera') END;
+    INSERT INTO inventario_movimientos(codigo_producto, tipo, delta_disponible, delta_reservado,
+                                       prescripcion_id, usuario_id, nota, fecha)
+    VALUES (NEW.codigo_producto, 'RESERVA', -NEW.dosis_prescritas, NEW.dosis_prescritas, NEW.id, NULL,
+            'Apartado al llegar el pedido (fórmula en espera)', NEW.fecha_apartado);
+    INSERT INTO historia_clinica_eventos(historia_id, oid_ingreso, tipo, descripcion, autor_id, fecha)
+    VALUES (NEW.historia_id, NEW.oid_ingreso, 'PRESCRIPCION',
+            'Llegó el medicamento: ' || NEW.dosis_prescritas || ' dosis de ' ||
+            (SELECT nombre FROM productos_farmacia WHERE codigo = NEW.codigo_producto) ||
+            ' apartadas para el paciente hasta ' || NEW.fecha_limite_reclamo, NULL, NEW.fecha_apartado);
+END;
+
+-- Pedidos a proveedor: dan la fecha estimada de llegada que ve el paciente cuando no hay existencias
+CREATE TABLE pedidos_compra (
+    id                      INTEGER PRIMARY KEY,
+    codigo_producto         TEXT NOT NULL REFERENCES productos_farmacia(codigo),
+    cantidad                INTEGER NOT NULL CHECK (cantidad > 0),
+    proveedor               TEXT,
+    fecha_pedido            TEXT NOT NULL,
+    fecha_estimada_llegada  TEXT NOT NULL,
+    estado                  TEXT NOT NULL DEFAULT 'EN_CAMINO' CHECK (estado IN ('EN_CAMINO','RECIBIDO','CANCELADO')),
+    fecha_recibido          TEXT,
+    creado_por              INTEGER REFERENCES usuarios(id),
+    CHECK (fecha_estimada_llegada >= substr(fecha_pedido, 1, 10))
+);
+CREATE INDEX ix_pedidos_producto ON pedidos_compra(codigo_producto, estado, fecha_estimada_llegada);
+
 -- R3. Dispensar: solo fórmulas vigentes, dentro de la ventana y sin exceder lo prescrito
 CREATE TRIGGER trg_disp_validar BEFORE INSERT ON dispensaciones
 BEGIN
     SELECT CASE
+      WHEN (SELECT estado FROM prescripciones WHERE id = NEW.prescripcion_id) = 'PENDIENTE_STOCK'
+        THEN RAISE(ABORT, 'Medicamento sin existencias: se aparta para el paciente cuando llegue el pedido')
       WHEN (SELECT estado FROM prescripciones WHERE id = NEW.prescripcion_id) NOT IN ('VIGENTE','PARCIAL')
         THEN RAISE(ABORT, 'La fórmula no está vigente (caducada, entregada o anulada)')
       WHEN (SELECT ambito FROM prescripciones WHERE id = NEW.prescripcion_id) = 'AMBULATORIA'
@@ -406,6 +465,7 @@ CREATE TABLE hc_registros (
     motivo_cambio      TEXT,
     estado             TEXT NOT NULL DEFAULT 'ACTIVO' CHECK (estado IN ('ACTIVO','ANULADO')),
     motivo_anulacion   TEXT,
+    origen_externo     TEXT,                              -- importado: sistema, autor y fecha originales
     CHECK (estado = 'ACTIVO' OR motivo_anulacion IS NOT NULL),
     CHECK (version = 1 OR motivo_cambio IS NOT NULL)
 );
@@ -513,11 +573,120 @@ BEGIN
             NEW.motivo_anulacion, NEW.anulado_por, NEW.anulado_en);
 END;
 
+-- Ficha clínica del paciente: alergias, antecedentes, medicación habitual (una por paciente, con versiones)
+CREATE TABLE hc_ficha (
+    id_paciente               INTEGER PRIMARY KEY,
+    grupo_sanguineo           TEXT CHECK (grupo_sanguineo IS NULL OR grupo_sanguineo IN
+                                  ('O+','O-','A+','A-','B+','B-','AB+','AB-')),
+    alergias                  TEXT,                     -- "Penicilina (urticaria); Sulfas"; NULL = sin dato
+    sin_alergias_conocidas    INTEGER NOT NULL DEFAULT 0 CHECK (sin_alergias_conocidas IN (0,1)),
+    antecedentes_personales   TEXT,
+    antecedentes_quirurgicos  TEXT,
+    antecedentes_familiares   TEXT,
+    medicacion_habitual       TEXT,
+    habitos                   TEXT,
+    contacto_emergencia       TEXT,
+    telefono_emergencia       TEXT,
+    observaciones             TEXT,
+    actualizado_por           INTEGER REFERENCES usuarios(id),
+    actualizado_en            TEXT NOT NULL,
+    CHECK (NOT (sin_alergias_conocidas = 1 AND alergias IS NOT NULL))
+);
+CREATE TABLE hc_ficha_versiones (
+    id            INTEGER PRIMARY KEY,
+    id_paciente   INTEGER NOT NULL,
+    contenido     TEXT NOT NULL,                        -- JSON de la ficha anterior
+    vigente_desde TEXT NOT NULL,
+    reemplazada_en TEXT NOT NULL,
+    reemplazada_por INTEGER REFERENCES usuarios(id)
+);
+CREATE TRIGGER trg_ficha_version BEFORE UPDATE ON hc_ficha
+BEGIN
+    INSERT INTO hc_ficha_versiones(id_paciente, contenido, vigente_desde, reemplazada_en, reemplazada_por)
+    VALUES (OLD.id_paciente, json_object('grupo_sanguineo', OLD.grupo_sanguineo, 'alergias', OLD.alergias,
+            'sin_alergias_conocidas', OLD.sin_alergias_conocidas, 'antecedentes_personales', OLD.antecedentes_personales,
+            'antecedentes_quirurgicos', OLD.antecedentes_quirurgicos, 'antecedentes_familiares',
+            OLD.antecedentes_familiares, 'medicacion_habitual', OLD.medicacion_habitual, 'habitos', OLD.habitos,
+            'contacto_emergencia', OLD.contacto_emergencia, 'telefono_emergencia', OLD.telefono_emergencia,
+            'observaciones', OLD.observaciones), OLD.actualizado_en, NEW.actualizado_en, NEW.actualizado_por);
+END;
+CREATE TRIGGER trg_ficha_no_delete BEFORE DELETE ON hc_ficha
+BEGIN SELECT RAISE(ABORT, 'La ficha clínica no se elimina'); END;
+
+-- Asignación manual de camas (sobre el censo del extracto): ocupar con estancia estimada o liberar
+CREATE TABLE camas_asignaciones (
+    id               INTEGER PRIMARY KEY,
+    codigo_cama      TEXT NOT NULL,
+    accion           TEXT NOT NULL CHECK (accion IN ('OCUPAR','LIBERAR')),
+    id_paciente      INTEGER,
+    dias_estimados   INTEGER CHECK (dias_estimados IS NULL OR dias_estimados BETWEEN 1 AND 90),
+    motivo           TEXT,
+    usuario_id       INTEGER NOT NULL REFERENCES usuarios(id),
+    fecha            TEXT NOT NULL,
+    CHECK (accion = 'LIBERAR' OR (id_paciente IS NOT NULL AND dias_estimados IS NOT NULL)),
+    CHECK (accion = 'OCUPAR' OR motivo IS NOT NULL)
+);
+CREATE INDEX ix_camas_asig ON camas_asignaciones(codigo_cama, fecha);
+CREATE TRIGGER trg_camas_asig_no_update BEFORE UPDATE ON camas_asignaciones
+BEGIN SELECT RAISE(ABORT, 'Los movimientos de cama no se editan; registre uno nuevo'); END;
+CREATE TRIGGER trg_camas_asig_no_delete BEFORE DELETE ON camas_asignaciones
+BEGIN SELECT RAISE(ABORT, 'Los movimientos de cama no se eliminan'); END;
+CREATE TRIGGER trg_camas_asig_evento AFTER INSERT ON camas_asignaciones
+WHEN NEW.id_paciente IS NOT NULL
+ AND EXISTS (SELECT 1 FROM historias_clinicas WHERE id_paciente = NEW.id_paciente)
+BEGIN
+    INSERT INTO historia_clinica_eventos(historia_id, tipo, descripcion, autor_id, fecha)
+    SELECT id, 'DATOS_PACIENTE',
+           CASE NEW.accion WHEN 'OCUPAR' THEN 'Asignada la cama ' || NEW.codigo_cama || ' (estancia estimada ' ||
+                NEW.dias_estimados || ' días)'
+                ELSE 'Liberada la cama ' || NEW.codigo_cama || ' · ' || NEW.motivo END,
+           NEW.usuario_id, NEW.fecha
+      FROM historias_clinicas WHERE id_paciente = NEW.id_paciente;
+END;
+
+-- -----------------------------------------------------------------------------
+-- 3c. Turnos de atención (fila de espera con código), recuperación de contraseña
+-- -----------------------------------------------------------------------------
+CREATE TABLE turnos_atencion (
+    id            INTEGER PRIMARY KEY,
+    fecha         TEXT NOT NULL,                        -- día (AAAA-MM-DD): los códigos se reinician cada día
+    servicio      TEXT NOT NULL CHECK (servicio IN ('CONSULTA','FARMACIA','LABORATORIO','ADMISIONES')),
+    numero        INTEGER NOT NULL,
+    codigo        TEXT NOT NULL,                        -- C-007, F-012, L-003, A-021
+    id_paciente   INTEGER NOT NULL,
+    cita_id       INTEGER REFERENCES citas(id),
+    prioridad     INTEGER NOT NULL DEFAULT 0 CHECK (prioridad IN (0,1)),   -- 1 = adulto mayor, gestante, discapacidad
+    estado        TEXT NOT NULL DEFAULT 'EN_ESPERA'
+                  CHECK (estado IN ('EN_ESPERA','LLAMADO','EN_ATENCION','ATENDIDO','NO_SE_PRESENTO')),
+    modulo        TEXT,                                 -- consultorio o ventanilla que llama
+    creado_por    INTEGER REFERENCES usuarios(id),
+    creado_en     TEXT NOT NULL,
+    llamado_en    TEXT,
+    atendido_en   TEXT,
+    atendido_por  INTEGER REFERENCES usuarios(id),
+    UNIQUE (fecha, servicio, numero)
+);
+CREATE INDEX ix_turnos_atencion ON turnos_atencion(fecha, servicio, estado);
+CREATE UNIQUE INDEX ux_turno_activo_paciente ON turnos_atencion(fecha, servicio, id_paciente)
+    WHERE estado IN ('EN_ESPERA','LLAMADO','EN_ATENCION');
+
+CREATE TABLE recuperacion_clave (
+    id           INTEGER PRIMARY KEY,
+    usuario_id   INTEGER NOT NULL REFERENCES usuarios(id),
+    codigo_hash  TEXT NOT NULL,                         -- nunca el código en claro
+    creado_en    TEXT NOT NULL,
+    expira_en    TEXT NOT NULL,
+    usado_en     TEXT,
+    intentos     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX ix_recuperacion ON recuperacion_clave(usuario_id, creado_en);
+
 -- -----------------------------------------------------------------------------
 -- 4. Datos semilla: roles y matriz de permisos
 -- -----------------------------------------------------------------------------
 INSERT INTO roles(id, codigo, nombre) VALUES
- (1,'ADMIN','Administrador'), (2,'DOCTOR','Médico'), (3,'ENFERMERIA','Enfermería'), (4,'PACIENTE','Paciente');
+ (1,'ADMIN','Administrador'), (2,'DOCTOR','Médico'), (3,'ENFERMERIA','Enfermería'), (4,'PACIENTE','Paciente'),
+ (5,'FACTURACION','Facturación y admisiones');
 
 INSERT INTO permisos(codigo, descripcion) VALUES
  ('tablero.gerencial.ver',      'KPIs hospitalarios y métricas gerenciales'),
@@ -538,21 +707,32 @@ INSERT INTO permisos(codigo, descripcion) VALUES
  ('portal.propio',              'Citas, fórmulas e historial PROPIOS'),
  ('pacientes.registrar',        'Registrar pacientes y actualizar sus datos'),
  ('hc.registrar',               'Crear, corregir y anular registros de historia clínica y adjuntos'),
- ('hc.buscar',                  'Buscar historias clínicas (gerencia: solo índice, sin contenido clínico)');
+ ('hc.buscar',                  'Buscar historias clínicas'),
+ ('hc.exportar',                'Descargar en PDF, exportar e importar historias clínicas'),
+ ('camas.gestionar',            'Ocupar y liberar camas'),
+ ('citas.gestionar',            'Agendar, reprogramar y cancelar citas de cualquier paciente'),
+ ('citas.agenda',               'Ver la agenda propia y atender citas'),
+ ('turnos_atencion.gestionar',  'Dar y llamar turnos de atención (fila de espera)'),
+ ('personal.turnos',            'Asignar turnos de trabajo al personal');
 
 INSERT INTO rol_permisos(rol_id, permiso_id)
 SELECT r.id, p.id FROM roles r JOIN permisos p ON
   (r.codigo = 'ADMIN'      AND p.codigo IN ('tablero.gerencial.ver','agente.consultar','usuarios.administrar',
                                              'auditoria.ver','inventario.auditar','farmacia.alertas.ver',
                                              'farmacia.orden_compra','camas.ver','pacientes.registrar',
-                                             'hc.buscar'))
+                                             'hc.buscar','hc.ver_completa','hc.exportar','camas.gestionar',
+                                             'personal.turnos'))
   OR (r.codigo = 'DOCTOR'  AND p.codigo IN ('agente.consultar','farmacia.alertas.ver','camas.ver','hc.ver_completa',
                                              'hc.ver_notas','hc.acceso_emergencia','prescripcion.crear',
                                              'interconsulta.solicitar','pacientes.registrar','hc.registrar',
-                                             'hc.buscar'))
+                                             'hc.buscar','hc.exportar','camas.gestionar','citas.agenda',
+                                             'turnos_atencion.gestionar'))
   OR (r.codigo = 'ENFERMERIA' AND p.codigo IN ('farmacia.alertas.ver','camas.ver','hc.ver_notas',
-                                             'hc.acceso_emergencia','dispensacion.registrar','dosis.registrar'))
-  OR (r.codigo = 'PACIENTE' AND p.codigo IN ('portal.propio'));
+                                             'hc.acceso_emergencia','dispensacion.registrar','dosis.registrar',
+                                             'hc.buscar','camas.gestionar'))
+  OR (r.codigo = 'PACIENTE' AND p.codigo IN ('portal.propio'))
+  OR (r.codigo = 'FACTURACION' AND p.codigo IN ('pacientes.registrar','citas.gestionar',
+                                             'turnos_atencion.gestionar','camas.ver'));
 
 -- Versión del esquema: si una clinico.db vieja tiene otra, se respalda y se recrea (pharmacy_service)
-PRAGMA user_version = 2;
+PRAGMA user_version = 6;
