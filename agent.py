@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
+import difflib
 import math
 import re
 import sqlite3
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -196,18 +198,30 @@ def _authorizer(action, arg1, arg2, dbname, source):  # noqa: ARG001 - firma exi
 
 
 class QueryExecutor:
+    """Ejecuta el SQL validado con tiempo máximo.
+
+    El tiempo máximo lo impone un temporizador aparte que llama a conn.interrupt() (seguro entre hilos y sin
+    ejecutar Python dentro de SQLite). Antes se usaba set_progress_handler: con varios usuarios a la vez cada
+    consulta esperaba el candado global de Python miles de veces y la app se quedaba congelada (lo encontró la
+    prueba de rendimiento con 10 usuarios simultáneos). Conexión propia + candado: el authorizer y interrupt()
+    no toleran que dos hilos usen la conexión a la vez, así que corre una consulta generada a la vez (cada una
+    tarda milisegundos)."""
+
     def __init__(self, db_path=None):
         self.conn = db.get_connection(read_only=True, db_path=db_path)
         self.conn.set_authorizer(_authorizer)
+        self._lock = threading.Lock()
 
     def run(self, sql: str) -> tuple[str, pd.DataFrame]:
         safe_sql = SQLGuard.sanitize(sql)
-        deadline = time.monotonic() + config.SQL_TIMEOUT_SECONDS
-        self.conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
-        try:
-            df = pd.read_sql_query(safe_sql, self.conn)
-        finally:
-            self.conn.set_progress_handler(None, 0)
+        with self._lock:
+            timer = threading.Timer(config.SQL_TIMEOUT_SECONDS, self.conn.interrupt)
+            timer.daemon = True
+            timer.start()
+            try:
+                df = pd.read_sql_query(safe_sql, self.conn)
+            finally:
+                timer.cancel()
         return safe_sql, anonymize(df)
 
 
@@ -347,7 +361,54 @@ def parse_period(question: str, ref: date, default: str = "mes") -> tuple[date, 
         return ref, ref, "hoy"
     if default == "semana":
         return ref - timedelta(days=6), ref, "última semana"
+    if default == "total":
+        return date(2000, 1, 1), ref, "todo el periodo del extracto"
     return ref.replace(day=1), ref, "mes en curso"
+
+
+PROCEDURE_SUFFIX = (r"\w+(ectomia|otomia|ostomia|plastia|scopia|rrafia|centesis|pexia|tripsia|grafia)\b|"
+                    r"\b(cesar[ei]as?|legrado|biopsias?|circuncision|curetaje|cateterismo|endoscopia|dialisis)\b")
+PROCEDURE_Q = (r"(atendid|operad|intervenid|realizad|practicad|tratad|hicieron|se hizo|les hicieron)\w*\s+(por|de|con|una|un)\s"
+               r"|procedimiento|" + PROCEDURE_SUFFIX)
+_STOP = {"de", "del", "la", "el", "los", "las", "en", "este", "esta", "mes", "semana", "hoy", "por", "con", "un", "una",
+         "que", "y", "para", "a", "al", "se", "cuantos", "cuantas", "pacientes", "grafica", "grafico", "ultimo", "ultima",
+         "periodo", "todo", "total", "historico", "dias", "ano", "ultimos"}
+
+
+def procedure_term(question: str) -> str | None:
+    """Nombre del procedimiento en la pregunta: una palabra quirúrgica (…ectomía, …plastia) o lo que sigue a
+    «atendidos por», «operados de», «procedimiento de»."""
+    q = normalize(question)
+    m = re.search(PROCEDURE_SUFFIX, q)
+    if m:
+        return m.group(0)
+    m = re.search(r"(?:atendid\w*|operad\w*|intervenid\w*|realizad\w*|practicad\w*|tratad\w*|procedimientos?)"
+                  r"\s+(?:por|de|con)\s+(?:una?\s+|la\s+|el\s+)?([a-z ]{4,60})", q)
+    if not m:
+        return None
+    words = []
+    for w in m.group(1).split():
+        if w in _STOP:
+            break
+        words.append(w)
+    return " ".join(words) or None
+
+
+def spelling_variants(term: str) -> list[str]:
+    """El término y sus escrituras alternativas frecuentes (basectomía → vasectomía, cesárea → cesarea…)."""
+    out = [term]
+    term = re.sub(r"(ea|ia)s$", r"\1", term)            # plural simple: cesáreas → cesárea
+    out.append(term)
+    swaps = [("b", "v"), ("v", "b"), ("s", "c"), ("c", "s"), ("z", "s"), ("s", "z"), ("y", "ll"), ("ll", "y"),
+             ("ria", "rea"), ("rea", "ria")]
+    for a, b in swaps:
+        if a in term:
+            out.append(term.replace(a, b))
+    if term.startswith("h"):
+        out.append(term[1:])
+    else:
+        out.append("h" + term)
+    return list(dict.fromkeys(out))
 
 
 SERVICE_KEYWORDS = [
@@ -582,7 +643,11 @@ class HospitalAgent:
 
     def __init__(self, provider: str | None = None, mode: str | None = None, db_path=None):
         self.executor = QueryExecutor(db_path)
-        self.conn = self.executor.conn
+        # Conexión aparte, de solo lectura (mode=ro), para los KPIs y recomendaciones con SQL FIJO del sistema.
+        # Sin authorizer a propósito: un authorizer (callback de Python dentro de SQLite) en una conexión que
+        # usan varios hilos a la vez congela el proceso, y el agente lo comparten todos los usuarios de la app.
+        # El SQL generado por la IA nunca pasa por aquí: va siempre por el ejecutor (authorizer + candado).
+        self.conn = db.get_connection(read_only=True, db_path=db_path)
         self.ref = db.get_reference_date(self.conn)
         self.llm = create_llm_client(provider)
         # llm_first: LLM y, si falla, Plan B | hybrid: Plan B si reconoce la intención, si no LLM | rules
@@ -635,6 +700,7 @@ class HospitalAgent:
     def close(self) -> None:
         """Libera el archivo de la base (necesario en Windows antes de reconstruirla)."""
         self.conn.close()
+        self.executor.conn.close()
 
     # ------------------------------------------------------------------ NL2SQL con LLM
     def _system_prompt(self) -> str:
@@ -758,6 +824,7 @@ GROUP BY especialidad ORDER BY servicios DESC LIMIT 10
             Intent("rotacion", rx(r"rotacion|mas (consumid|usad|dispensad)|menos (consumid|usad)|"
                                   r"(mayor|menor) consumo|medicament.*(mas|menos)"), HospitalAgent._h_rotation, 15),
             Intent("espera", rx(r"espera|demora|tarda|tiempo.*atencion"), HospitalAgent._h_wait, 20),
+            Intent("procedimiento", rx(PROCEDURE_Q), HospitalAgent._h_procedure, 24),
             Intent("cirugias", rx(r"cirug|quirofan"), HospitalAgent._h_surgery, 25),
             Intent("ocupacion", rx(r"ocupa|camas?\b.*(libre|disponib)|disponib.*camas?|censo"),
                    HospitalAgent._h_occupancy, 30),
@@ -890,6 +957,65 @@ GROUP BY {level} ORDER BY pacientes DESC""")
                 answer += f" Le sigue {str(df.iloc[1][level]).title()} con {fmt_num(df.iloc[1].pacientes)}."
             answer += "\n\n_Clasificación según la última cama asignada al episodio._"
         return AgentResponse(question, answer, sql, df, chart={"type": "bar", "x": level, "y": "pacientes"})
+
+    # --- Procedimientos por nombre ("pacientes atendidos por apendicectomía") -------------------
+    def _procedure_catalog(self) -> list[tuple[str, str, str]]:
+        """(código, nombre, nombre normalizado) de los procedimientos que registra el extracto."""
+        if getattr(self, "_catalog", None) is None:
+            rows = self.conn.execute("SELECT codigo_servicio, nombre_servicio FROM servicios "
+                                     "WHERE nombre_servicio IS NOT NULL GROUP BY 1, 2").fetchall()
+            self._catalog = [(str(c), str(n), normalize(str(n))) for c, n in rows]
+        return self._catalog
+
+    def _h_procedure(self, question: str) -> AgentResponse:
+        term = procedure_term(question)
+        if not term:
+            return AgentResponse(question, "Dime el nombre del procedimiento, por ejemplo: «pacientes atendidos por "
+                                           "apendicectomía».", engine="reglas")
+        catalog = self._procedure_catalog()
+        found, used = [], term
+        for variant in spelling_variants(term):          # errores comunes de escritura: b/v, s/c/z, y/ll, h
+            found = [c for c in catalog if variant in c[2]]
+            if found:
+                used = variant
+                break
+        if not found:
+            names = sorted({c[1] for c in catalog})
+            close = difflib.get_close_matches(term.upper(), [n.upper() for n in names], n=5, cutoff=0.45)
+            words = difflib.get_close_matches(term, sorted({w for c in catalog for w in c[2].split() if len(w) > 5}),
+                                              n=4, cutoff=0.7)
+            hint = sorted({c[1].capitalize() for c in catalog if any(w in c[2] for w in words)})[:5] or \
+                [n.capitalize() for n in close]
+            tried = [v for v in spelling_variants(term)[1:3]]
+            answer = (f"El extracto del hospital **no registra ningún procedimiento con «{term}»**"
+                      + (f" (tampoco escrito «{'» ni «'.join(tried)}»)" if tried else "")
+                      + f". Revisé {fmt_num(len(names))} procedimientos distintos, así que no hay pacientes para "
+                      "graficar.")
+            if hint:
+                answer += " Los nombres más parecidos son: " + "; ".join(hint) + ". Pregúntame por uno de ellos."
+            return AgentResponse(question, answer, engine="reglas")
+        start, end, label = parse_period(question, self.ref, default="total")
+        codes = ", ".join("'" + c[0].replace("'", "") + "'" for c in found[:200])
+        sql, df = self._query(f"""
+SELECT substr(s.fecha_prestacion, 1, 7) AS mes, COUNT(DISTINCT i.id_paciente) AS pacientes,
+       SUM(s.cantidad) AS procedimientos
+FROM servicios s JOIN ingresos i ON i.oid_ingreso = s.oid_ingreso
+WHERE s.codigo_servicio IN ({codes})
+  AND s.fecha_prestacion BETWEEN {lit(start)} AND {lit(end, True)}
+GROUP BY mes ORDER BY mes""")
+        total = self.conn.execute(f"""
+            SELECT COUNT(DISTINCT i.id_paciente) FROM servicios s JOIN ingresos i ON i.oid_ingreso = s.oid_ingreso
+             WHERE s.codigo_servicio IN ({codes}) AND s.fecha_prestacion BETWEEN {lit(start)} AND {lit(end, True)}
+        """).fetchone()[0]
+        which = sorted({c[1].capitalize() for c in found})
+        note = f" (entendí «{used}»)" if used != term else ""
+        if df.empty:
+            answer = f"No hay pacientes atendidos por **{used}**{note} en {label}."
+        else:
+            answer = (f"**{fmt_num(total)} pacientes** fueron atendidos por **{used}**{note} ({label}), mes a mes en la "
+                      f"gráfica. Procedimientos incluidos: " + "; ".join(which[:6])
+                      + (f" y {len(which) - 6} más." if len(which) > 6 else "."))
+        return AgentResponse(question, answer, sql, df, chart={"type": "bar", "x": "mes", "y": "pacientes"})
 
     def _h_specialty(self, question: str) -> AgentResponse:
         start, end, label = parse_period(question, self.ref, default="mes")

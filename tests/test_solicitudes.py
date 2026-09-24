@@ -37,9 +37,9 @@ def _pid(clin, doc):
 # --- Solicitudes de cita --------------------------------------------------------------------
 def test_demo_trae_solicitudes_pendientes_para_facturacion(clin):
     rows = rq.pending_requests(clin)
-    assert len(rows) == 2 and {r["canal"] for r in rows} == {"PORTAL", "ASISTENTE"}
+    assert len(rows) == 5 and {r["canal"] for r in rows} == {"PORTAL", "ASISTENTE"}
     notif = nt.collect("FACTURACION", {"id": FACT}, clin, None, NOW, [])
-    assert notif and "solicitudes de cita" in notif[0].title
+    assert any("solicitudes de cita" in n.title for n in notif)
 
 
 def test_paciente_pide_cita_y_facturacion_agenda_y_avisa(clin):
@@ -66,7 +66,7 @@ def test_paciente_pide_cita_y_facturacion_agenda_y_avisa(clin):
     fake = {"nombres": "Rosa Elena", "tipo": "MEDICINA_GENERAL", "edad": 76}
     link = rq.whatsapp_link("300 222 3344", rq.whatsapp_message(fake, appt))
     assert link.startswith("https://wa.me/573002223344?text=") and "Rosa" in rq.whatsapp_message(fake, appt)
-    assert len(pending) == 2
+    assert len(pending) == 5
     juan = next(r for r in pending if r["canal"] == "PORTAL")
     assert rq.whatsapp_message(juan).startswith("Hola, le escribimos del Hospital Susana López de Valencia sobre Juan José")
     assert rq.suggested_specialty(juan, sch.specialties(clin)) == "PEDIATRIA"
@@ -119,7 +119,7 @@ def test_el_bot_crea_la_solicitud_del_paciente(clin):
 
 # --- Solicitudes de registro ----------------------------------------------------------------
 def test_registro_de_persona_nueva(clin):
-    assert len(rq.pending_registrations(clin)) == 1          # caso sintético de la demo
+    assert len(rq.pending_registrations(clin)) == 3          # casos sintéticos de la demo
     with pytest.raises(sqlite3.IntegrityError, match="correo"):
         rq.create_registration(clin, nombres="Pedro", apellidos="Gómez", tipo_documento="CC",
                                numero_documento="1061999888", correo="no-correo", telefono=None, now=NOW)
@@ -139,7 +139,7 @@ def test_registro_de_persona_nueva(clin):
     other = rq.pending_registrations(clin)[0]["id"]
     rq.reject_registration(clin, other, motivo="No es paciente de esta red de servicios", by=ADMIN, now=NOW)
     notif = nt.collect("ADMIN", {"id": ADMIN}, clin, ps_conn(), NOW, [])
-    assert not any("registrarse" in n.title for n in notif)
+    assert any(n.title == "2 personas piden registrarse" for n in notif)   # 3 de la demo + Pedro − 2 atendidas
 
 
 def ps_conn():
@@ -233,14 +233,13 @@ def test_coordinacion_asigna_cama_solo_a_sus_pacientes(clin):
 
 
 def test_conversacion_paciente_facturacion(clin):
-    pending = {r["canal"]: r for r in rq.pending_requests(clin)}
-    sol = pending["ASISTENTE"]                                   # paciente 110
+    sol = next(r for r in rq.pending_requests(clin) if r["id_paciente"] == 110)
     with pytest.raises(sqlite3.IntegrityError, match="inexistente"):   # otro paciente no escribe en ella
         rq.send_message(clin, sol["id"], lado="PACIENTE", autor_id=None, texto="hola", now=NOW, id_paciente=999)
     rq.send_message(clin, sol["id"], lado="PACIENTE", autor_id=4, texto="¿Me pueden atender el jueves?", now=NOW,
                     id_paciente=110)
     fact = nt.collect("FACTURACION", {"id": FACT}, clin, None, NOW, [])
-    assert any("mensaje nuevo de pacientes" in n.title for n in fact)
+    assert any("de pacientes" in n.title and "mensaje" in n.title for n in fact)
     rq.mark_read(clin, sol["id"], "FACTURACION")
     rq.send_message(clin, sol["id"], lado="FACTURACION", autor_id=FACT,
                     texto="Sí, le asignamos medicina general el jueves 8:00", now=NOW)

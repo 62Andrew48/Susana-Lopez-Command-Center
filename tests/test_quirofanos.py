@@ -45,7 +45,7 @@ def test_capacity_profile_is_grounded_in_history():
 
 def test_waitlist_synced_from_his_and_idempotent(clin):
     n = len(sp.waitlist(clin))
-    assert n == 41                                      # 40 del HIS sin ejecutar + 1 urgencia de la demo
+    assert n == 44                      # 40 del HIS sin ejecutar + 1 urgencia y 3 solicitudes de la demo
     assert sp.sync_waitlist(clin, config.DB_PATH) == 0
 
 

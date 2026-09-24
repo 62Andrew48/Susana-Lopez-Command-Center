@@ -60,14 +60,19 @@ def test_booking_prevents_double_booking(clin):
 def test_check_in_queue_priority_and_position(clin):
     carlos, rosa, laura = _pid(clin, "10542001"), _pid(clin, "25270444"), _pid(clin, "1061700001")
     assert sch.patient_tickets(clin, carlos, NOW)[0]["codigo"] == "C-001"
+    with clin:  # la demo trae más gente en la fila: se dan por atendidos para aislar la prueba (salvo Carlos)
+        clin.execute("UPDATE turnos_atencion SET estado = 'ATENDIDO' WHERE servicio = 'CONSULTA' AND codigo <> 'C-001'")
+        clin.execute("UPDATE turnos_atencion SET estado = 'EN_ESPERA' WHERE servicio = 'CONSULTA' AND codigo = 'C-001'")
+    last = clin.execute("SELECT MAX(numero) FROM turnos_atencion WHERE servicio = 'CONSULTA' AND fecha = ?",
+                        (NOW[:10],)).fetchone()[0]
     t2 = sch.issue_ticket(clin, servicio="CONSULTA", id_paciente=laura, by=ADMISIONES, now=NOW)
     t3 = sch.issue_ticket(clin, servicio="CONSULTA", id_paciente=110, by=ADMISIONES, now=NOW, prioridad=True)
-    assert (t2, t3) == ("C-002", "C-003")
+    assert (t2, t3) == (f"C-{last + 1:03d}", f"C-{last + 2:03d}")
     assert sch.patient_tickets(clin, laura, NOW)[0]["antes"] == 2     # C-003 tiene prioridad y C-001 llegó antes
     with pytest.raises(sqlite3.IntegrityError, match="ya tiene el turno"):
         sch.issue_ticket(clin, servicio="CONSULTA", id_paciente=laura, by=ADMISIONES, now=NOW)
     called = sch.call_next(clin, servicio="CONSULTA", modulo="Consultorio 2", by=DRA, now=NOW)
-    assert called["codigo"] == "C-003" and called["estado"] == "LLAMADO"
+    assert called["codigo"] == t3 and called["estado"] == "LLAMADO"
     assert sch.patient_tickets(clin, laura, NOW)[0]["antes"] == 1
     cita = clin.execute("SELECT cita_id FROM turnos_atencion WHERE codigo = 'C-001'").fetchone()[0]
     sch.set_outcome(clin, cita, DRA, True, NOW)

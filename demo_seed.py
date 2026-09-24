@@ -16,6 +16,7 @@ from pathlib import Path
 
 import clinical_records as cr
 import demo_cases
+import demo_extra
 import surgery_planner as sp
 import pharmacy_service as ps
 
@@ -177,6 +178,7 @@ def seed(conn: sqlite3.Connection, analytics_db: Path) -> None:
         ps.dispense(conn, pid, 3, 4, "2026-09-21 06:30:00")
     # Casos clínicos sintéticos (pacientes con nombre, ficha, notas y laboratorios) y más usuarios del equipo
     demo_cases.seed_cases(conn)
+    demo_extra.seed_extra(conn, analytics_db)  # fila de turnos, citas de hoy y más solicitudes
     # Lista de espera quirúrgica: programaciones del HIS sin evidencia de ejecución + una urgencia de la demo
     sp.sync_waitlist(conn, analytics_db)
     if "UCI" in by_service:
