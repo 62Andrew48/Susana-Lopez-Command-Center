@@ -149,6 +149,52 @@ def suggested_specialty(row, specialties: list[str]) -> str:
     return specialties[0]
 
 
+# ---------------------------------------------------------------------------
+# Mensajes paciente ↔ facturación (dentro de la solicitud)
+# ---------------------------------------------------------------------------
+def send_message(conn: sqlite3.Connection, request_id: int, *, lado: str, autor_id: int | None, texto: str, now: str,
+                 id_paciente: int | None = None) -> int:
+    """El paciente (solo en SUS solicitudes) o facturación escriben en la conversación de una solicitud abierta."""
+    row = conn.execute("SELECT * FROM solicitudes_cita WHERE id = ?", (request_id,)).fetchone()
+    if row is None or (lado == "PACIENTE" and row["id_paciente"] != id_paciente):
+        raise sqlite3.IntegrityError("Solicitud inexistente")
+    if lado not in ("PACIENTE", "FACTURACION"):
+        raise sqlite3.IntegrityError("Remitente no válido")
+    if row["estado"] == "CANCELADA":
+        raise sqlite3.IntegrityError("La solicitud fue retirada; envía una nueva")
+    text = " ".join((texto or "").split())
+    if len(text) < 2:
+        raise sqlite3.IntegrityError("Escribe el mensaje")
+    with conn:
+        mid = conn.execute("INSERT INTO solicitudes_cita_mensajes(solicitud_id, autor_id, lado, texto, fecha) "
+                           "VALUES (?,?,?,?,?)", (request_id, autor_id, lado, text[:800], now)).lastrowid
+        if lado == "FACTURACION" and row["contactado_en"] is None:
+            conn.execute("UPDATE solicitudes_cita SET contactado_en = ? WHERE id = ?", (now, request_id))
+    return mid
+
+
+def messages(conn: sqlite3.Connection, request_id: int) -> list[sqlite3.Row]:
+    return conn.execute("""
+        SELECT m.*, COALESCE(u.nombre_mostrado, '') AS autor FROM solicitudes_cita_mensajes m
+          LEFT JOIN usuarios u ON u.id = m.autor_id WHERE m.solicitud_id = ? ORDER BY m.id""", (request_id,)).fetchall()
+
+
+def mark_read(conn: sqlite3.Connection, request_id: int, reader: str) -> None:
+    """Marca como leídos los mensajes del OTRO lado (reader = quien lee)."""
+    other = "FACTURACION" if reader == "PACIENTE" else "PACIENTE"
+    with conn:
+        conn.execute("UPDATE solicitudes_cita_mensajes SET leido = 1 WHERE solicitud_id = ? AND lado = ? AND leido = 0",
+                     (request_id, other))
+
+
+def unread(conn: sqlite3.Connection, lado: str, id_paciente: int | None = None) -> int:
+    """Mensajes sin leer que le llegan a `lado` (facturación: de todos los pacientes; paciente: los suyos)."""
+    other = "FACTURACION" if lado == "PACIENTE" else "PACIENTE"
+    extra, args = ("AND s.id_paciente = ?", [id_paciente]) if id_paciente else ("", [])
+    return conn.execute(f"SELECT COUNT(*) FROM solicitudes_cita_mensajes m JOIN solicitudes_cita s "
+                        f"ON s.id = m.solicitud_id WHERE m.lado = ? AND m.leido = 0 {extra}", [other, *args]).fetchone()[0]
+
+
 def whatsapp_message(row, cita: sqlite3.Row | None = None) -> str:
     """Mensaje que facturación envía por WhatsApp."""
     name = (row["nombres"] or "").split()[0] if row["nombres"] else ""

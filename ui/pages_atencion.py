@@ -173,7 +173,13 @@ def _requests_tab() -> None:
                         st.rerun()
                     except sqlite3.IntegrityError as exc:
                         st.error(str(exc))
-            with st.expander("Agendar la cita", icon=":material/event_available:"):
+            msgs = rq.messages(clin, r["id"])
+            waiting = bool(msgs) and msgs[-1]["lado"] == "PACIENTE"   # el paciente espera respuesta
+            label = f"Mensajes con el paciente ({len(msgs)})" if msgs else "Escribirle al paciente"
+            with st.expander(label + (" · espera tu respuesta" if waiting else ""), icon=":material/forum:",
+                             expanded=waiting):
+                request_thread(clin, r, "FACTURACION", "fac")
+            with st.expander("Agendar la cita (asignar profesional)", icon=":material/event_available:"):
                 default = rq.suggested_specialty(r, specs)
                 k1, k2 = st.columns(2)
                 spec = k1.selectbox("Especialidad", specs, index=specs.index(default), format_func=lambda x: x.title(),
@@ -398,17 +404,49 @@ def colored_history(rows) -> None:
     st.dataframe(styled, hide_index=True, width="stretch", height=min(38 * (len(df) + 1), 380))
 
 
+def request_thread(clin, request, me: str, key: str, id_paciente: int | None = None) -> None:
+    """Conversación de una solicitud (paciente ↔ facturación) y caja para escribir."""
+    rows = rq.messages(clin, request["id"])
+    rq.mark_read(clin, request["id"], me)
+    bubbles = []
+    for m in rows:
+        mine = m["lado"] == me
+        who = "Tú" if mine else ("Facturación" + (f" · {m['autor']}" if m["autor"] else "") if m["lado"] == "FACTURACION"
+                                 else "Paciente")
+        align, bg = ("flex-end", "#E0E7FF") if mine else ("flex-start", "#F1F5F9")
+        bubbles.append(f'<div style="display:flex;justify-content:{align};margin:0.25rem 0">'
+                       f'<div style="background:{bg};border-radius:12px;padding:0.4rem 0.7rem;max-width:80%">'
+                       f'<div style="font-size:0.72rem;color:{MUTED}">{esc(who)} · {_ts(m["fecha"])}</div>'
+                       f'<div style="font-size:0.9rem">{esc(m["texto"])}</div></div></div>')
+    if bubbles:
+        st.markdown("".join(bubbles), unsafe_allow_html=True)
+    if request["estado"] == "CANCELADA":
+        return
+    target = "facturación" if me == "PACIENTE" else "el paciente"
+    with st.form(f"msg_{key}_{request['id']}", clear_on_submit=True, border=False):
+        c1, c2 = st.columns([5, 1.3], vertical_alignment="bottom")
+        text = c1.text_input(f"Mensaje para {target}", placeholder="Escribe aquí…" if me == "PACIENTE" else
+                             "Ej.: le asignamos medicina general mañana a las 8:00, ¿le sirve?")
+        if c2.form_submit_button("Enviar", icon=":material/send:", width="stretch"):
+            try:
+                rq.send_message(clin, request["id"], lado=me, autor_id=ctx.user_id(), texto=text, now=ctx.clock(),
+                                id_paciente=id_paciente)
+                st.rerun()
+            except sqlite3.IntegrityError as exc:
+                st.error(str(exc))
+
+
 def _request_form(clin, id_paciente: int) -> None:
     """El paciente cuenta qué le pasa; facturación le agenda y le escribe (no elige médico ni hora)."""
     patient = cr.get_patient(clin, id_paciente)
     with st.form("sol_cita", clear_on_submit=True):
         tipo = st.selectbox("¿Qué necesitas?", list(rq.TYPES), format_func=rq.TYPES.get)
-        sintomas = st.text_area("Cuéntanos qué te pasa", placeholder="Ej.: tengo tos y fiebre desde hace 3 días",
-                                max_chars=600)
+        sintomas = st.text_area("Mensaje para facturación: cuéntanos qué te pasa",
+                                placeholder="Ej.: tengo tos y fiebre desde hace 3 días", max_chars=600)
         c1, c2 = st.columns(2)
         pref = c1.selectbox("¿Cuándo puedes ir?", list(rq.PREFERENCES), format_func=rq.PREFERENCES.get, index=2)
         phone = c2.text_input("Tu WhatsApp o teléfono", value=(patient["telefono"] if patient else "") or "")
-        if st.form_submit_button("Enviar solicitud", type="primary", icon=":material/send:"):
+        if st.form_submit_button("Enviar a facturación", type="primary", icon=":material/send:"):
             try:
                 rq.create_request(clin, id_paciente=id_paciente, tipo=tipo, sintomas=sintomas, preferencia=pref,
                                   telefono=phone, canal="PORTAL", now=ctx.clock())
@@ -457,15 +495,22 @@ def patient_appointments_tab(id_paciente: int) -> None:
             a.markdown(f"**Solicitud enviada el {_ts(pending['creada_en'])}** · {esc(rq.TYPES[pending['tipo']])} · "
                        f"{esc(rq.PREFERENCES[pending['preferencia']].lower())}<br>"
                        f"<span style='color:{MUTED};font-size:0.85rem'>{esc(pending['sintomas'])}</span><br>"
-                       + chip("Facturación te escribirá por WhatsApp o verás la cita aquí", "info"),
-                       unsafe_allow_html=True)
+                       + chip("Facturación la revisa, te asigna el profesional y te responde aquí o por WhatsApp",
+                              "info"), unsafe_allow_html=True)
             if b.button("Retirar", key=f"sol_cancel_{pending['id']}", width="stretch"):
                 rq.cancel_request(clin, pending["id"], id_paciente, ctx.clock())
                 st.rerun()
+            st.markdown("**Mensajes con facturación**")
+            request_thread(clin, pending, "PACIENTE", "pac", id_paciente)
     else:
-        st.caption("Cuéntanos qué te pasa y facturación te asigna la cita con el profesional adecuado. "
-                   "También puedes escribírselo al asistente.")
+        st.caption("Escríbele a facturación qué te pasa: ellos lo valoran, te asignan el profesional adecuado y te "
+                   "responden aquí o por WhatsApp. También puedes escribírselo al asistente.")
         _request_form(clin, id_paciente)
+        recent = next((r for r in requests if r["estado"] in ("AGENDADA", "CERRADA")), None)
+        if recent is not None:
+            with st.expander(f"Conversación de tu última solicitud ({rq.STATE[recent['estado']].lower()})",
+                             icon=":material/forum:"):
+                request_thread(clin, recent, "PACIENTE", "pacold", id_paciente)
     if config.HOSPITAL_WHATSAPP:
         st.link_button("Escribir a facturación por WhatsApp", icon=":material/chat:",
                        url=rq.whatsapp_link(config.HOSPITAL_WHATSAPP, "Hola, quiero pedir una cita en el HSLV.")

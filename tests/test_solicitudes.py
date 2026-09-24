@@ -230,3 +230,27 @@ def test_coordinacion_asigna_cama_solo_a_sus_pacientes(clin):
     perms = ps.user_permissions(clin, COORD)
     assert "camas.quirurgicas" in perms and "camas.gestionar" not in perms
     assert {"quirofanos.proponer", "registro.atender"} <= ps.user_permissions(clin, ADMIN)
+
+
+def test_conversacion_paciente_facturacion(clin):
+    pending = {r["canal"]: r for r in rq.pending_requests(clin)}
+    sol = pending["ASISTENTE"]                                   # paciente 110
+    with pytest.raises(sqlite3.IntegrityError, match="inexistente"):   # otro paciente no escribe en ella
+        rq.send_message(clin, sol["id"], lado="PACIENTE", autor_id=None, texto="hola", now=NOW, id_paciente=999)
+    rq.send_message(clin, sol["id"], lado="PACIENTE", autor_id=4, texto="¿Me pueden atender el jueves?", now=NOW,
+                    id_paciente=110)
+    fact = nt.collect("FACTURACION", {"id": FACT}, clin, None, NOW, [])
+    assert any("mensaje nuevo de pacientes" in n.title for n in fact)
+    rq.mark_read(clin, sol["id"], "FACTURACION")
+    rq.send_message(clin, sol["id"], lado="FACTURACION", autor_id=FACT,
+                    texto="Sí, le asignamos medicina general el jueves 8:00", now=NOW)
+    assert clin.execute("SELECT contactado_en FROM solicitudes_cita WHERE id = ?", (sol["id"],)).fetchone()[0] == NOW
+    pac = nt.collect("PACIENTE", {"id": 4, "id_paciente": 110}, clin, None, NOW, [])
+    assert any(n.title == "Facturación te escribió" for n in pac)
+    assert [m["lado"] for m in rq.messages(clin, sol["id"])] == ["PACIENTE", "FACTURACION"]
+    assert rq.unread(clin, "PACIENTE", 110) == 1
+    rq.mark_read(clin, sol["id"], "PACIENTE")
+    assert rq.unread(clin, "PACIENTE", 110) == 0
+    rq.cancel_request(clin, sol["id"], 110, NOW)
+    with pytest.raises(sqlite3.IntegrityError, match="retirada"):
+        rq.send_message(clin, sol["id"], lado="PACIENTE", autor_id=4, texto="hola", now=NOW, id_paciente=110)

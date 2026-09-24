@@ -767,6 +767,19 @@ CREATE TABLE solicitudes_cita (
 CREATE UNIQUE INDEX ux_solicitud_cita_pendiente ON solicitudes_cita(id_paciente) WHERE estado = 'PENDIENTE';
 CREATE TRIGGER trg_solicitudes_cita_no_delete BEFORE DELETE ON solicitudes_cita
 BEGIN SELECT RAISE(ABORT, 'Las solicitudes de cita no se eliminan'); END;
+-- Conversación paciente ↔ facturación sobre la solicitud (facturación valora y asigna el profesional)
+CREATE TABLE solicitudes_cita_mensajes (
+    id            INTEGER PRIMARY KEY,
+    solicitud_id  INTEGER NOT NULL REFERENCES solicitudes_cita(id),
+    autor_id      INTEGER REFERENCES usuarios(id),
+    lado          TEXT NOT NULL CHECK (lado IN ('PACIENTE','FACTURACION')),
+    texto         TEXT NOT NULL CHECK (length(trim(texto)) > 0),
+    fecha         TEXT NOT NULL,
+    leido         INTEGER NOT NULL DEFAULT 0 CHECK (leido IN (0,1))
+);
+CREATE INDEX ix_sol_mensajes ON solicitudes_cita_mensajes(solicitud_id, id);
+CREATE TRIGGER trg_sol_mensajes_no_delete BEFORE DELETE ON solicitudes_cita_mensajes
+BEGIN SELECT RAISE(ABORT, 'Los mensajes no se eliminan'); END;
 
 -- Persona que no está registrada en el hospital: pide su registro; gerencia la cita para ir en persona
 CREATE TABLE solicitudes_registro (
@@ -855,4 +868,4 @@ SELECT r.id, p.id FROM roles r JOIN permisos p ON
                                              'camas.ver','camas.quirurgicas'));
 
 -- Versión del esquema: si una clinico.db vieja tiene otra, se respalda y se recrea (pharmacy_service)
-PRAGMA user_version = 10;
+PRAGMA user_version = 11;

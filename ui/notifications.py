@@ -273,16 +273,32 @@ def _registrations(clin: sqlite3.Connection) -> list[Notification]:
                          "Cítalas para que vayan al hospital con su documento.", "personal", "Atender")]
 
 
+def _new_messages(clin: sqlite3.Connection, lado: str, id_paciente: int | None = None) -> list[Notification]:
+    """Mensajes sin leer en las solicitudes de cita (lado = quien los recibe)."""
+    other = "FACTURACION" if lado == "PACIENTE" else "PACIENTE"
+    extra, args = ("AND s.id_paciente = ?", [id_paciente]) if id_paciente else ("", [])
+    row = clin.execute(f"SELECT COUNT(*), MAX(m.id) FROM solicitudes_cita_mensajes m JOIN solicitudes_cita s "
+                       f"ON s.id = m.solicitud_id WHERE m.lado = ? AND m.leido = 0 {extra}", [other, *args]).fetchone()
+    if not row[0]:
+        return []
+    if lado == "PACIENTE":
+        return [Notification(f"msg_pac:{row[1]}", "alta", "Facturación te escribió",
+                             _n(row[0], "mensaje nuevo", "mensajes nuevos") + " sobre tu solicitud de cita", "portal",
+                             "Leer")]
+    return [Notification(f"msg_fac:{row[1]}", "alta", _n(row[0], "mensaje nuevo de pacientes", "mensajes nuevos de pacientes"),
+                         "En las solicitudes de cita.", "atencion", "Leer")]
+
+
 def _billing(clin: sqlite3.Connection, now: str) -> list[Notification]:
     rows = clin.execute("SELECT id, creada_en FROM solicitudes_cita WHERE estado = 'PENDIENTE' ORDER BY creada_en"
                         ).fetchall()
     if not rows:
-        return []
+        return _new_messages(clin, "FACTURACION")
     oldest_h = (_dt(now) - _dt(rows[0]["creada_en"])).total_seconds() / 3600
     return [Notification(f"solcita:{rows[-1]['id']}:{len(rows)}", "alta" if oldest_h >= 24 else "media",
                          _n(len(rows), "solicitud de cita por atender", "solicitudes de cita por atender"),
                          f"La más antigua espera hace {int(oldest_h)} h. Agenda y avisa por WhatsApp.", "atencion",
-                         "Atender")]
+                         "Atender")] + _new_messages(clin, "FACTURACION")
 
 
 def _patient_requests(clin: sqlite3.Connection, id_paciente: int) -> list[Notification]:
@@ -317,7 +333,8 @@ def collect(role: str, user: dict, clin: sqlite3.Connection, analytics: sqlite3.
     elif role == "FACTURACION":
         items = _billing(clin, now)
     elif role == "PACIENTE":
-        items = _patient(clin, user["id_paciente"], now) + _patient_requests(clin, user["id_paciente"])
+        items = (_patient(clin, user["id_paciente"], now) + _patient_requests(clin, user["id_paciente"])
+                 + _new_messages(clin, "PACIENTE", user["id_paciente"]))
     else:
         items = []
     return sorted(items, key=lambda n: ORDER.get(n.severity, 9))
