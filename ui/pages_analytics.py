@@ -291,7 +291,7 @@ def _epidemiology_section(start, end) -> None:
 # ===========================================================================
 ENGINE_LABEL = {"llm": "LLM (NL2SQL)", "reglas": "Plan B · SQL validado",
                 "reglas (respaldo)": "Plan B de respaldo (el LLM falló)", "seguridad": "Bloqueado",
-                "sql directo": "⌨️ SQL escrito por el usuario (validado)"}
+                "sql directo": "SQL escrito por el usuario (validado)", "archivo": "Análisis del archivo subido"}
 
 
 def _render_chart(df: pd.DataFrame, spec: dict | None, key: str) -> None:
@@ -339,17 +339,9 @@ def _render_response(resp: AgentResponse, idx: int) -> None:
 
 def page_asistente() -> None:
     agent = ctx.get_agent()
-    with st.sidebar:
-        st.markdown("**Motor del asistente**")
-        options = {"Automático (LLM + respaldo)": "llm_first", "Híbrido (reglas primero)": "hybrid",
-                   "Solo reglas (Plan B)": "rules"}
-        default = 0 if config.LLM_PROVIDER != "none" else 2
-        label = st.radio("Motor", list(options), index=default, label_visibility="collapsed", key="engine")
-        agent.mode = options[label]
-        if agent.llm:
-            st.success(f"LLM activo: {agent.llm.name}", icon=":material/psychology:")
-        else:
-            st.info("Sin LLM configurado: responde el Plan B (SQL validado, sin red).", icon=":material/verified_user:")
+    # Siempre automático: si hay modelo de IA configurado responde él; si falla o no hay red, responde el respaldo
+    # de consultas verificadas (Plan B). El usuario no tiene que elegir motor.
+    agent.mode = "llm_first" if agent.llm else "rules"
     banner("<b>Consultas de solo lectura</b> sobre la base analítica anonimizada (<code>mode=ro</code> + authorizer "
            "SQLite). El asistente no tiene acceso a historias clínicas ni a prescripciones.", "ok")
 
@@ -361,11 +353,18 @@ def page_asistente() -> None:
 
     history = st.session_state.setdefault("history", {}).setdefault(ctx.user_id(), [])
     chat_box = st.container()
-    prompt = st.chat_input("Pregunta en lenguaje natural, p. ej.: ¿Qué especialidades son más solicitadas este mes?")
-    prompt = prompt or st.session_state.pop("pending", None)
-    if prompt:
-        with st.spinner("Consultando la base del hospital…"):
-            history.append((prompt, chat.ask(prompt)))  # incluye la intención de ubicar camas
+    if chat.can_upload():
+        st.caption("Puedes adjuntar un CSV, Excel, PDF, TXT o imagen (máx. 20 MB) con el clip del chat y preguntar sobre "
+                   "él. El archivo no se guarda; si hay IA configurada su contenido se envía al proveedor, así que no "
+                   "subas datos que identifiquen pacientes.")
+    value = chat.chat_box("Escribe, graba o adjunta un archivo, p. ej.: ¿Qué especialidades son más solicitadas "
+                          "este mes?")
+    pending = st.session_state.pop("pending", None)
+    if value is not None or pending:
+        with st.spinner("Consultando…"):
+            result = chat.submit(value, pending)  # incluye la intención de ubicar camas y el análisis de archivos
+        if result:
+            history.append(result)
     with chat_box:
         if not history:
             st.caption("Usa una de las 4 preguntas del reto o escribe la tuya.")
@@ -374,6 +373,8 @@ def page_asistente() -> None:
                 st.markdown(question)
             with st.chat_message("assistant", avatar=str(LOGO_ICON)):
                 _render_response(resp, i)
+                if i == len(history) - 1:
+                    chat.speak(resp, f"p{i}")
     if history and st.button("Limpiar conversación"):
         history.clear()
         st.rerun()

@@ -17,7 +17,7 @@ PRAGMA journal_mode = WAL;          -- lecturas concurrentes mientras se escribe
 -- -----------------------------------------------------------------------------
 CREATE TABLE roles (
     id          INTEGER PRIMARY KEY,
-    codigo      TEXT NOT NULL UNIQUE CHECK (codigo IN ('ADMIN','DOCTOR','ENFERMERIA','PACIENTE','FACTURACION')),
+    codigo      TEXT NOT NULL UNIQUE CHECK (codigo IN ('ADMIN','DOCTOR','ENFERMERIA','PACIENTE','FACTURACION','QUIROFANOS')),
     nombre      TEXT NOT NULL
 );
 
@@ -118,7 +118,7 @@ CREATE TABLE historia_clinica_eventos (
     oid_ingreso    INTEGER,                              -- episodio del HIS (ref. lógica)
     tipo           TEXT NOT NULL CHECK (tipo IN ('NOTA_EVOLUCION','PRESCRIPCION','DISPENSACION',
                      'ADMINISTRACION_DOSIS','FORMULA_CADUCADA','INTERCONSULTA','CITA','ALERTA',
-                     'REGISTRO_HC','ADJUNTO','DATOS_PACIENTE')),
+                     'REGISTRO_HC','ADJUNTO','DATOS_PACIENTE','CIRUGIA')),
     descripcion    TEXT NOT NULL,
     autor_id       INTEGER REFERENCES usuarios(id),      -- NULL = proceso automático del sistema
     fecha          TEXT NOT NULL DEFAULT (datetime('now'))
@@ -435,6 +435,7 @@ CREATE TABLE pacientes_clinicos (
     asegurador        TEXT,
     regimen           TEXT,
     municipio         TEXT,
+    correo            TEXT,                              -- lo registra admisiones: habilita la cuenta del portal
     estado            TEXT NOT NULL DEFAULT 'ACTIVO' CHECK (estado IN ('ACTIVO','INACTIVO')),
     creado_por        INTEGER REFERENCES usuarios(id),
     creado_en         TEXT NOT NULL DEFAULT (datetime('now')),
@@ -681,12 +682,53 @@ CREATE TABLE recuperacion_clave (
 );
 CREATE INDEX ix_recuperacion ON recuperacion_clave(usuario_id, creado_en);
 
+-- Auto-registro del paciente en el portal: documento + el correo que registró admisiones -> código de 6 dígitos
+CREATE TABLE registro_pacientes (
+    id           INTEGER PRIMARY KEY,
+    id_paciente  INTEGER NOT NULL REFERENCES pacientes_clinicos(id_paciente),
+    correo       TEXT NOT NULL,
+    codigo_hash  TEXT NOT NULL,                         -- nunca el código en claro
+    creado_en    TEXT NOT NULL,
+    expira_en    TEXT NOT NULL,
+    usado_en     TEXT,
+    intentos     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX ix_registro_pacientes ON registro_pacientes(id_paciente, creado_en);
+
+-- Lista de espera quirúrgica y programación (capacidad en cirugías/día por área: ver surgery_planner.py)
+CREATE TABLE cirugias_solicitudes (
+    id                        INTEGER PRIMARY KEY,
+    origen                    TEXT NOT NULL CHECK (origen IN ('HIS','APP')),
+    consecutivo_programacion  TEXT UNIQUE,              -- HIS: programación sin evidencia de ejecución
+    id_paciente               INTEGER NOT NULL,
+    area_quirofano            TEXT NOT NULL,
+    procedimientos            INTEGER NOT NULL DEFAULT 1,
+    codigos_cups              TEXT,
+    prioridad                 TEXT NOT NULL CHECK (prioridad IN ('URGENTE','PRIORITARIA','ELECTIVA')),
+    fecha_solicitud           TEXT NOT NULL,
+    estado                    TEXT NOT NULL DEFAULT 'EN_ESPERA'
+                              CHECK (estado IN ('EN_ESPERA','PROGRAMADA','REALIZADA','CANCELADA')),
+    fecha_programada          TEXT,
+    nota                      TEXT,
+    motivo                    TEXT,
+    motivo_categoria          TEXT,
+    sobrecupo_justificacion   TEXT,                      -- programada por encima de la capacidad probada
+    creado_por                INTEGER REFERENCES usuarios(id),
+    actualizado_por           INTEGER REFERENCES usuarios(id),
+    actualizado_en            TEXT,
+    CHECK (estado <> 'PROGRAMADA' OR fecha_programada IS NOT NULL),
+    CHECK (estado <> 'CANCELADA' OR motivo IS NOT NULL)
+);
+CREATE INDEX ix_cirugias_sol ON cirugias_solicitudes(estado, area_quirofano, fecha_programada);
+CREATE TRIGGER trg_cirugias_sol_no_delete BEFORE DELETE ON cirugias_solicitudes
+BEGIN SELECT RAISE(ABORT, 'Las solicitudes quirúrgicas no se eliminan; cancélelas con un motivo'); END;
+
 -- -----------------------------------------------------------------------------
 -- 4. Datos semilla: roles y matriz de permisos
 -- -----------------------------------------------------------------------------
 INSERT INTO roles(id, codigo, nombre) VALUES
  (1,'ADMIN','Administrador'), (2,'DOCTOR','Médico'), (3,'ENFERMERIA','Enfermería'), (4,'PACIENTE','Paciente'),
- (5,'FACTURACION','Facturación y admisiones');
+ (5,'FACTURACION','Facturación y admisiones'), (6,'QUIROFANOS','Coordinación de quirófanos');
 
 INSERT INTO permisos(codigo, descripcion) VALUES
  ('tablero.gerencial.ver',      'KPIs hospitalarios y métricas gerenciales'),
@@ -713,7 +755,10 @@ INSERT INTO permisos(codigo, descripcion) VALUES
  ('citas.gestionar',            'Agendar, reprogramar y cancelar citas de cualquier paciente'),
  ('citas.agenda',               'Ver la agenda propia y atender citas'),
  ('turnos_atencion.gestionar',  'Dar y llamar turnos de atención (fila de espera)'),
- ('personal.turnos',            'Asignar turnos de trabajo al personal');
+ ('personal.turnos',            'Asignar turnos de trabajo al personal'),
+ ('quirofanos.ver',             'Ver indicadores, lista de espera y programación de quirófanos'),
+ ('quirofanos.solicitar',       'Solicitar cirugías y cancelar las propias en espera'),
+ ('quirofanos.coordinar',       'Programar, reprogramar, cancelar y cerrar cirugías (coordinación de quirófanos)');
 
 INSERT INTO rol_permisos(rol_id, permiso_id)
 SELECT r.id, p.id FROM roles r JOIN permisos p ON
@@ -721,18 +766,20 @@ SELECT r.id, p.id FROM roles r JOIN permisos p ON
                                              'auditoria.ver','inventario.auditar','farmacia.alertas.ver',
                                              'farmacia.orden_compra','camas.ver','pacientes.registrar',
                                              'hc.buscar','hc.ver_completa','hc.exportar','camas.gestionar',
-                                             'personal.turnos'))
+                                             'personal.turnos','quirofanos.ver'))
   OR (r.codigo = 'DOCTOR'  AND p.codigo IN ('agente.consultar','farmacia.alertas.ver','camas.ver','hc.ver_completa',
                                              'hc.ver_notas','hc.acceso_emergencia','prescripcion.crear',
                                              'interconsulta.solicitar','pacientes.registrar','hc.registrar',
                                              'hc.buscar','hc.exportar','camas.gestionar','citas.agenda',
-                                             'turnos_atencion.gestionar'))
+                                             'turnos_atencion.gestionar','quirofanos.ver','quirofanos.solicitar'))
   OR (r.codigo = 'ENFERMERIA' AND p.codigo IN ('farmacia.alertas.ver','camas.ver','hc.ver_notas',
                                              'hc.acceso_emergencia','dispensacion.registrar','dosis.registrar',
                                              'hc.buscar','camas.gestionar'))
   OR (r.codigo = 'PACIENTE' AND p.codigo IN ('portal.propio'))
   OR (r.codigo = 'FACTURACION' AND p.codigo IN ('pacientes.registrar','citas.gestionar',
-                                             'turnos_atencion.gestionar','camas.ver'));
+                                             'turnos_atencion.gestionar','camas.ver'))
+  OR (r.codigo = 'QUIROFANOS' AND p.codigo IN ('quirofanos.ver','quirofanos.solicitar','quirofanos.coordinar',
+                                             'camas.ver'));
 
 -- Versión del esquema: si una clinico.db vieja tiene otra, se respalda y se recrea (pharmacy_service)
-PRAGMA user_version = 6;
+PRAGMA user_version = 9;

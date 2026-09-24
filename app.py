@@ -33,6 +33,7 @@ from ui import pages_clinical as pc
 from ui import pages_hoy as ph
 from ui import pages_inventario as pi
 from ui import pages_personal as pper
+from ui import pages_quirofanos as pq
 from ui import pages_predicciones as pp
 from ui import session as ss
 from ui.theme import chip, inject_css, inject_dark
@@ -107,6 +108,8 @@ CATALOG = [  # grupo del menú, slug, título, icono, página, permisos que la h
     ("Operación", "camas", "Mapa de camas", ":material/bed:", pm.page_camas, {"camas.ver"}),
     ("Operación", "alertas", "Alertas y acciones", ":material/notification_important:", pa.page_alertas, {"farmacia.alertas.ver"}),
     ("Operación", "inventario", "Inventario", ":material/inventory_2:", pi.page_inventario, {"inventario.auditar"}),
+    ("Quirófanos", "quirofanos", "Programación quirúrgica", ":material/medical_services:", pq.page_quirofanos,
+     {"quirofanos.ver"}),
     ("Clínico", "clinico", "Clínico y farmacia", ":material/stethoscope:", pc.page_clinico,
      {"hc.ver_notas", "hc.ver_completa", "prescripcion.crear", "dispensacion.registrar", "pacientes.registrar",
       "hc.buscar"}),
@@ -120,11 +123,12 @@ CATALOG = [  # grupo del menú, slug, título, icono, página, permisos que la h
      {"usuarios.administrar", "personal.turnos"}),
     ("Gestión", "datos", "Datos y auditoría", ":material/folder_managed:", pa.page_datos, {"auditoria.ver"}),
 ]
+HOME = "quirofanos" if ctx.current_user()["rol"] == "QUIROFANOS" else "hoy"  # cada rol entra a su módulo
 sections: dict[str, list] = {}
 ctx.PAGES.clear()
 for group, slug, title, icon, fn, needs in CATALOG:
     if P & needs:
-        page = st.Page(fn, title=title, icon=icon, url_path=slug, default=slug == "hoy")
+        page = st.Page(fn, title=title, icon=icon, url_path=slug, default=slug == HOME)
         ctx.PAGES[slug] = page
         sections.setdefault(group, []).append(page)
 

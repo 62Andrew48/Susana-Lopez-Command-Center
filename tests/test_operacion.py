@@ -303,3 +303,28 @@ def test_agent_explains_why_wait_changed(conn):
     from agent import HospitalAgent
     resp = HospitalAgent(provider="none", mode="rules").ask("¿Por qué cambió la espera en urgencias?")
     assert "Lo que más lo explica" in resp.answer
+
+
+def test_gemini_client_builds_request(monkeypatch):
+    import agent
+    import config
+    sent = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "SELECT 1"}]}}]}
+
+    def fake_post(url, headers, json, timeout):
+        sent.update(url=url, headers=headers, body=json)
+        return Resp()
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(agent.requests, "post", fake_post)
+    client = agent.create_llm_client("gemini")
+    assert client.name == "gemini"
+    out = client.complete("sistema", [{"role": "user", "content": "hola"}, {"role": "assistant", "content": "x"}])
+    assert out == "SELECT 1" and ":generateContent" in sent["url"] and sent["headers"]["x-goog-api-key"] == "k"
+    assert [c["role"] for c in sent["body"]["contents"]] == ["user", "model"]

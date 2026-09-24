@@ -248,10 +248,14 @@ def _patient_form(row: dict, locked_doc: bool = False) -> dict:
                            if row.get("regimen") in ("Contributivo", "Subsidiado", "Especial", "Particular") else None,
                            placeholder="Selecciona")
     municipio = c10.text_input("Municipio", value=row.get("municipio") or "")
-    direccion = st.text_input("Dirección", value=row.get("direccion") or "")
+    c11, c12 = st.columns(2)
+    direccion = c11.text_input("Dirección", value=row.get("direccion") or "")
+    correo = c12.text_input("Correo del paciente", value=row.get("correo") or "",
+                            help="Con este correo y su documento el paciente puede crear su cuenta en el portal.")
     data = {"tipo_documento": tipo, "numero_documento": numero, "nombres": nombres, "apellidos": apellidos,
             "fecha_nacimiento": fecha.isoformat() if fecha else None, "sexo": sexo, "telefono": telefono,
-            "asegurador": asegurador, "regimen": regimen, "municipio": municipio, "direccion": direccion}
+            "asegurador": asegurador, "regimen": regimen, "municipio": municipio, "direccion": direccion,
+            "correo": correo}
     if locked_doc and not numero:
         data.pop("tipo_documento")
     if row.get("nombres", "").startswith("Paciente ") and not nombres:

@@ -12,6 +12,7 @@ No depende de Streamlit.
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ DOC_TYPES = {"CC": "Cédula de ciudadanía", "TI": "Tarjeta de identidad", "RC":
              "CE": "Cédula de extranjería", "PPT": "Permiso por protección temporal", "PA": "Pasaporte"}
 SEXES = ("Femenino", "Masculino", "Intersexual")
 PATIENT_FIELDS = ("tipo_documento", "numero_documento", "nombres", "apellidos", "fecha_nacimiento", "sexo",
-                  "telefono", "direccion", "asegurador", "regimen", "municipio")
+                  "telefono", "direccion", "asegurador", "regimen", "municipio", "correo")
 _MAGIC = {"application/pdf": (b"%PDF",), "image/png": (b"\x89PNG\r\n\x1a\n",), "image/jpeg": (b"\xff\xd8\xff",)}
 
 
@@ -33,6 +34,16 @@ def _now(now: datetime | str | None) -> str:
     if now is None:
         return datetime.now().strftime(DATETIME_FMT)
     return now if isinstance(now, str) else now.strftime(DATETIME_FMT)
+
+
+EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$")
+
+
+def _email(value) -> str | None:
+    text = (_clean(value) or "").lower() or None
+    if text and not EMAIL.match(text):
+        raise sqlite3.IntegrityError("El correo no es válido")
+    return text
 
 
 def _clean(value) -> str | None:
@@ -57,6 +68,7 @@ def ensure_history(conn: sqlite3.Connection, id_paciente: int, now: datetime | s
 def register_patient(conn: sqlite3.Connection, user_id: int, data: dict, now: datetime | str | None = None) -> int:
     """Paciente nuevo (no está en el extracto): documento y nombres obligatorios. Abre su historia clínica."""
     d = {k: _clean(data.get(k)) for k in PATIENT_FIELDS}
+    d["correo"] = _email(data.get("correo"))
     if not d["numero_documento"] or not d["tipo_documento"]:
         raise sqlite3.IntegrityError("Tipo y número de documento son obligatorios")
     if not d["nombres"] or not d["apellidos"]:
@@ -121,7 +133,8 @@ def update_patient(conn: sqlite3.Connection, id_paciente: int, user_id: int, dat
     current = get_patient(conn, id_paciente)
     if current is None:
         raise sqlite3.IntegrityError("Paciente inexistente")
-    changes = {k: _clean(v) for k, v in data.items() if k in PATIENT_FIELDS and _clean(v) != current[k]}
+    norm = {k: (_email(v) if k == "correo" else _clean(v)) for k, v in data.items() if k in PATIENT_FIELDS}
+    changes = {k: v for k, v in norm.items() if v != current[k]}
     if current["origen"] == "REGISTRO" and ("numero_documento" in changes and not changes["numero_documento"]):
         raise sqlite3.IntegrityError("El número de documento es obligatorio")
     if not changes:

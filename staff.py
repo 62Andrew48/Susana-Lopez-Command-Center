@@ -26,7 +26,7 @@ SHIFT_TEMPLATES = {  # nombre: (hora inicio, horas de duración, tipo)
 }
 SERVICES = ("Urgencias", "Hospitalización", "UCI", "Pediatría", "Gineco-obstetricia", "Cirugía", "Consulta externa",
             "Farmacia", "Admisiones")
-ROLE_IDS = {"ADMIN": 1, "DOCTOR": 2, "ENFERMERIA": 3, "PACIENTE": 4, "FACTURACION": 5}
+ROLE_IDS = {"ADMIN": 1, "DOCTOR": 2, "ENFERMERIA": 3, "PACIENTE": 4, "FACTURACION": 5, "QUIROFANOS": 6}
 
 
 def temp_password() -> str:
@@ -95,7 +95,7 @@ def reset_password(conn: sqlite3.Connection, admin_id: int, user_id: int, now: s
 # ---------------------------------------------------------------------------
 def staff_members(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("""SELECT u.id, u.nombre_mostrado, r.codigo AS rol, u.especialidad FROM usuarios u
-                           JOIN roles r ON r.id = u.rol_id WHERE r.codigo IN ('DOCTOR','ENFERMERIA','FACTURACION')
+                           JOIN roles r ON r.id = u.rol_id WHERE r.codigo IN ('DOCTOR','ENFERMERIA','FACTURACION','QUIROFANOS')
                            AND u.estado_cuenta = 'ACTIVO' ORDER BY r.id, u.nombre_mostrado""").fetchall()
 
 
@@ -209,3 +209,40 @@ def reassignment_hint(rows: list[dict]) -> str | None:
     return (f"{busiest['servicio']} carga {busiest['por_enfermera']} pacientes por persona de enfermería y "
             f"{donor['servicio']} {donor['por_enfermera']}: considera mover a una persona de {donor['servicio']} "
             f"a {busiest['servicio']}.")
+
+
+def _references(conn: sqlite3.Connection, user_id: int) -> list[str]:
+    """Tablas donde la cuenta dejó rastro (bitácora, historia clínica, fórmulas, citas, turnos pasados…)."""
+    found = []
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+    for t in tables:
+        for fk in conn.execute(f"PRAGMA foreign_key_list('{t}')").fetchall():
+            if fk[2] != "usuarios":
+                continue
+            col = fk[3]
+            if t in ("turnos", "recuperacion_clave"):
+                continue  # los turnos futuros y códigos se borran con la cuenta; los turnos pasados se revisan aparte
+            if conn.execute(f'SELECT 1 FROM "{t}" WHERE "{col}" = ? LIMIT 1', (user_id,)).fetchone():
+                found.append(t)
+    return sorted(set(found))
+
+
+def delete_user(conn: sqlite3.Connection, admin_id: int, user_id: int, now: str) -> None:
+    """Elimina una cuenta SOLO si nunca se usó (p. ej. creada por error). Si ya tiene historial, la ley y la
+    trazabilidad obligan a conservarla: se debe inactivar."""
+    if user_id == admin_id:
+        raise sqlite3.IntegrityError("No puedes eliminar tu propia cuenta")
+    user = conn.execute("SELECT usuario FROM usuarios WHERE id = ?", (user_id,)).fetchone()
+    if user is None:
+        raise sqlite3.IntegrityError("Cuenta inexistente")
+    refs = _references(conn, user_id)
+    past = conn.execute("SELECT 1 FROM turnos WHERE usuario_id = ? AND inicio <= ?", (user_id, now)).fetchone()
+    if refs or past:
+        where = ", ".join(refs + (["turnos trabajados"] if past else []))
+        raise sqlite3.IntegrityError(f"La cuenta tiene historial ({where}); no se puede borrar sin perder la "
+                                     "trazabilidad. Márcala como INACTIVA.")
+    with conn:
+        conn.execute("DELETE FROM turnos WHERE usuario_id = ?", (user_id,))
+        conn.execute("DELETE FROM recuperacion_clave WHERE usuario_id = ?", (user_id,))
+        conn.execute("DELETE FROM usuarios WHERE id = ?", (user_id,))
+        auth._audit(conn, admin_id, "USUARIO_ELIMINADO", f"{user[0]} (sin historial)", now)

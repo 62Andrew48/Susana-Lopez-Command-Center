@@ -18,9 +18,10 @@ from ui.theme import BORDER, BRAND_GREEN, MUTED, NAVY, TEXT, esc
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
 LOGO, LOGO_ICON = ASSETS / "logo_hslv.png", ASSETS / "logo_hslv_icono.png"
 AVATAR_COLOR = {"ADMIN": NAVY, "DOCTOR": BRAND_GREEN, "ENFERMERIA": "#0F766E", "PACIENTE": "#7C3AED",
-                "FACTURACION": "#B45309"}
+                "FACTURACION": "#B45309", "QUIROFANOS": "#0E7490"}
 DEMO_ACCOUNTS = [("admin", "Gerencia"), ("dra.ruiz", "Dra. Ruiz · Médica"), ("enf.gomez", "Enf. Gómez"),
-                 ("facturacion.alejandro", "Facturación · Alejandro"), ("paciente.laura", "Paciente Laura"), ("paciente.110", "Paciente 110")]
+                 ("facturacion.alejandro", "Facturación · Alejandro"),
+                 ("quirofanos.bravo", "Quirófanos · Bravo"), ("paciente.laura", "Paciente Laura"), ("paciente.110", "Paciente 110")]
 
 
 @lru_cache(maxsize=4)
@@ -49,6 +50,120 @@ def _do_login(username: str, password: str) -> None:
     st.rerun()
 
 
+def google_provider() -> str | None | bool:
+    """Proveedor OIDC configurado en .streamlit/secrets.toml ([auth] + [auth.google]). False si no hay."""
+    try:
+        cfg = st.secrets.get("auth", {})
+    except Exception:  # sin secrets.toml
+        return False
+    if not cfg or "redirect_uri" not in cfg or "cookie_secret" not in cfg:
+        return False
+    if "google" in cfg:
+        return "google"
+    return None if "client_id" in cfg else False
+
+
+def _google_logged_in() -> bool:
+    try:
+        return bool(st.user.is_logged_in)
+    except Exception:
+        return False
+
+
+def _google_callback() -> None:
+    """Vuelta de Google: el correo verificado debe corresponder a una cuenta activa del hospital."""
+    if google_provider() is False or not _google_logged_in():
+        return
+    email = str(st.user.get("email") or "")
+    if st.session_state.get("google_checked") == email:
+        return  # ya se intentó con este correo: no repetir el intento (ni la auditoría) en cada recarga
+    st.session_state.google_checked = email
+    result = auth.login_google(ctx.get_clin(), email, ctx.clock(), bool(st.user.get("email_verified", True)))
+    if result.user_id is None:
+        st.session_state.login_error = result.message
+        return
+    for key in ("login_error", "history", "ia_open", "authz", "emergency", "notif_read"):
+        st.session_state.pop(key, None)
+    st.session_state.user_id = result.user_id
+    st.session_state.via_google = True
+    st.rerun()
+
+
+def end_session() -> None:
+    """Cierra la sesión de la app y, si se entró con Google, también la de Google en esta app."""
+    google = st.session_state.get("via_google") or _google_logged_in()
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    if google:
+        st.logout()
+    st.rerun()
+
+
+def _google_button() -> None:
+    provider = google_provider()
+    if provider is False:
+        return
+    if _google_logged_in() and st.session_state.get("login_error"):
+        if st.button("Usar otra cuenta de Google", icon=":material/switch_account:", width="stretch"):
+            st.session_state.pop("google_checked", None)
+            st.session_state.pop("login_error", None)
+            st.logout()
+        return
+    if st.button("Ingresar con Google", icon=":material/account_circle:", width="stretch", key="google_login"):
+        st.login(provider) if provider else st.login()
+    st.markdown(f'<div style="text-align:center;color:{MUTED};font-size:0.8rem;margin:0.2rem 0 0.6rem">'
+                'o con tu usuario del hospital</div>', unsafe_allow_html=True)
+
+
+def _signup() -> None:
+    """Paciente: crea su cuenta con su documento y el correo que dio en admisiones. El código llega a ese correo."""
+    with st.expander("Soy paciente: crear mi cuenta"):
+        step = st.session_state.get("su_step", 1)
+        if step == 1:
+            st.caption("Usa el número de documento y el correo que registraste en admisiones o facturación. "
+                       "Si no diste correo, pide que lo registren en tu próxima visita.")
+            with st.form("su_request"):
+                doc = st.text_input("Número de documento")
+                mail = st.text_input("Correo")
+                if st.form_submit_button("Enviarme el código", width="stretch") and doc.strip() and mail.strip():
+                    try:
+                        pid, code = auth.request_signup(ctx.get_clin(), doc, mail, ctx.clock())
+                    except Exception as exc:
+                        st.error(str(exc))
+                        return
+                    sent = bool(pid) and mailer.send_signup_code(mail.strip().lower(), code, auth.CODE_MINUTES)
+                    st.session_state.su_data = (doc.strip(), mail.strip())
+                    st.session_state.su_demo_code = None if (sent or not pid) else code
+                    st.session_state.su_step = 2
+                    st.rerun()
+            return
+        st.info(auth.SIGNUP_GENERIC)
+        demo = st.session_state.get("su_demo_code")
+        if demo:
+            st.warning(f"Modo demostración (sin correo configurado): tu código es **{demo}**")
+        doc, mail = st.session_state.get("su_data", ("", ""))
+        with st.form("su_finish"):
+            code = st.text_input("Código", max_chars=6)
+            new = st.text_input("Crea tu contraseña", type="password", help="Mínimo 8 caracteres, con letras y números")
+            again = st.text_input("Repite la contraseña", type="password")
+            if st.form_submit_button("Crear mi cuenta", type="primary", width="stretch"):
+                if new != again:
+                    st.error("Las contraseñas no coinciden.")
+                else:
+                    try:
+                        auth.complete_signup(ctx.get_clin(), doc, mail, code, new, ctx.clock())
+                    except Exception as exc:
+                        st.error(str(exc))
+                    else:
+                        for k in ("su_step", "su_data", "su_demo_code"):
+                            st.session_state.pop(k, None)
+                        _do_login(mail.strip().lower(), new)
+        if st.button("Volver", key="su_back"):
+            for k in ("su_step", "su_data", "su_demo_code"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+
 def login_page() -> None:
     st.markdown(f"""<style>
       [data-testid="stSidebar"], header[data-testid="stHeader"] {{display:none;}}
@@ -59,6 +174,8 @@ def login_page() -> None:
     </style>""", unsafe_allow_html=True)
     st.markdown(f'<div class="login-brand">{logo_html(88)}<h2>Hospital Susana López de Valencia</h2>'
                 '<p>Centro de mando · inicia sesión para continuar</p></div>', unsafe_allow_html=True)
+    _google_callback()
+    _google_button()
     with st.form("login", border=True):
         user = st.text_input("Usuario", placeholder="p. ej. dra.ruiz")
         pwd = st.text_input("Contraseña", type="password")
@@ -67,6 +184,7 @@ def login_page() -> None:
     if st.session_state.get("login_error"):
         st.error(st.session_state.login_error)
     _recovery()
+    _signup()
     with st.expander("Acceso rápido para la demostración"):
         st.caption("Cuentas de prueba del escenario sintético (contraseña: demo). Cada ingreso queda en la bitácora. "
                    "Otras: dr.paredes (pediatría), enf.castro (turno de noche).")
@@ -105,9 +223,7 @@ def user_card() -> None:
                     unsafe_allow_html=True)
         if st.button("Cerrar sesión", key="logout", icon=":material/logout:", width="stretch"):
             auth.logout(ctx.get_clin(), user["id"], ctx.clock())
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            st.rerun()
+            end_session()
 
 
 def _recovery() -> None:
@@ -182,6 +298,4 @@ def forced_password_change() -> None:
     st.markdown("### Cambia tu contraseña")
     password_form("forced", forced=True)
     if st.button("Cerrar sesión", key="forced_logout"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
+        end_session()

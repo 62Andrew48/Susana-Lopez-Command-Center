@@ -16,6 +16,7 @@ from pathlib import Path
 
 import clinical_records as cr
 import demo_cases
+import surgery_planner as sp
 import pharmacy_service as ps
 
 FMT = "%Y-%m-%d %H:%M:%S"
@@ -176,6 +177,12 @@ def seed(conn: sqlite3.Connection, analytics_db: Path) -> None:
         ps.dispense(conn, pid, 3, 4, "2026-09-21 06:30:00")
     # Casos clínicos sintéticos (pacientes con nombre, ficha, notas y laboratorios) y más usuarios del equipo
     demo_cases.seed_cases(conn)
+    # Lista de espera quirúrgica: programaciones del HIS sin evidencia de ejecución + una urgencia de la demo
+    sp.sync_waitlist(conn, analytics_db)
+    if "UCI" in by_service:
+        sp.request_surgery(conn, id_paciente=by_service["UCI"]["id_paciente"], area="QUIROFANOS - TRAUMATOLOGIA Y ORTOPEDIA",
+                           prioridad="URGENTE", procedimiento="Osteosíntesis de fémur (fractura diafisaria)",
+                           user_id=2, now="2026-09-21 08:30:00", codigos="793501")
 
 
 def reset(clinical_db: Path, analytics_db: Path) -> sqlite3.Connection:

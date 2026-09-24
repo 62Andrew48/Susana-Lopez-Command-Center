@@ -173,3 +173,21 @@ def test_billing_role_permissions(clin):
     perms = ps.user_permissions(clin, ADMISIONES)
     assert {"citas.gestionar", "turnos_atencion.gestionar", "pacientes.registrar"} <= perms
     assert not perms & {"hc.ver_completa", "hc.ver_notas", "prescripcion.crear", "hc.buscar"}
+
+
+def test_delete_user_only_without_history(clin):
+    pwd = staff.create_user(clin, admin_id=ADMIN, usuario="error.creado", nombre="X", rol="FACTURACION",
+                            correo=None, now=NOW)
+    uid = clin.execute("SELECT id FROM usuarios WHERE usuario = 'error.creado'").fetchone()[0]
+    staff.delete_user(clin, ADMIN, uid, NOW)
+    assert clin.execute("SELECT 1 FROM usuarios WHERE id = ?", (uid,)).fetchone() is None
+    with pytest.raises(sqlite3.IntegrityError, match="historial"):
+        staff.delete_user(clin, ADMIN, DRA, NOW)                      # escribió historias y fórmulas
+    staff.create_user(clin, admin_id=ADMIN, usuario="usada", nombre="Y", rol="FACTURACION", correo=None, now=NOW)
+    used = clin.execute("SELECT id FROM usuarios WHERE usuario = 'usada'").fetchone()[0]
+    auth.login(clin, "usada", "mala", NOW)                           # un intento de ingreso ya deja rastro
+    with pytest.raises(sqlite3.IntegrityError, match="auditoria_accesos"):
+        staff.delete_user(clin, ADMIN, used, NOW)
+    with pytest.raises(sqlite3.IntegrityError, match="propia"):
+        staff.delete_user(clin, ADMIN, ADMIN, NOW)
+    assert pwd

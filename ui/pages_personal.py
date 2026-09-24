@@ -16,7 +16,8 @@ from ui import context as ctx
 from ui.theme import MUTED, chip, esc
 
 ROLE_LABEL = {"ADMIN": "Administrador", "DOCTOR": "Médico", "ENFERMERIA": "Enfermería", "PACIENTE": "Paciente",
-              "FACTURACION": "Facturación y admisiones"}
+              "FACTURACION": "Facturación y admisiones",
+              "QUIROFANOS": "Coordinación de quirófanos"}
 STATE_TONE = {"ACTIVO": "ok", "SUSPENDIDO": "warn", "INACTIVO": "neutral", "PENDIENTE_ACTIVACION": "info"}
 
 
@@ -196,5 +197,17 @@ def _users_tab() -> None:
         pwd = staff.reset_password(clin, ctx.user_id(), u["id"], ctx.clock())
         st.session_state.new_user_pwd = (u["usuario"], pwd)
         st.rerun()
-    st.markdown(f"<span style='color:{MUTED};font-size:0.8rem'>Las cuentas no se borran: se suspenden o inactivan para "
-                "conservar la trazabilidad de la bitácora.</span>", unsafe_allow_html=True)
+    with st.popover("Eliminar cuenta", icon=":material/delete:"):
+        st.caption("Solo se eliminan cuentas que nunca se usaron (por ejemplo, creadas por error). Si la cuenta ya "
+                   "tiene historial, se conserva y se marca como inactiva.")
+        confirm = st.text_input(f"Escribe {u['usuario']} para confirmar", key=f"u_del_c_{u['id']}")
+        if st.button("Eliminar definitivamente", key=f"u_del_{u['id']}", disabled=confirm.strip() != u["usuario"]):
+            try:
+                staff.delete_user(clin, ctx.user_id(), u["id"], ctx.clock())
+                st.toast(f"Cuenta {u['usuario']} eliminada", icon=":material/delete:")
+                st.rerun()
+            except sqlite3.IntegrityError as exc:
+                st.error(str(exc))
+                if st.button("Marcarla como inactiva", key=f"u_inact_{u['id']}"):
+                    staff.set_status(clin, ctx.user_id(), u["id"], "INACTIVO", "Retiro (no se puede borrar)", ctx.clock())
+                    st.rerun()

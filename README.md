@@ -54,28 +54,55 @@ Sin `.env` todo funciona en modo **Plan B** (sin red y sin costo).
 
 ## Versión 4: pacientes, historia clínica, citas y personal
 
-| Módulo | Admin | Médico | Enfermería | Facturación | Paciente |
-|---|---|---|---|---|---|
-| Pacientes (registrar, editar, inactivar) | ✓ | ✓ | | ✓ | |
-| Ficha del paciente (alergias, antecedentes, cama, fórmulas, citas) | lectura | ✓ edita | lectura | | la suya |
-| Registros de historia clínica y adjuntos (crear, corregir con versión, anular) | lectura | ✓ | lectura | | la suya |
-| Buscar historias, descargar PDF, exportar e importar (JSON) | ✓ | ✓ | busca | | busca en la suya y descarga |
-| Alerta de alergia al formular (penicilinas, AINE, sulfas…) | | ✓ | | | |
-| Medicamento sin existencias: en espera, fecha de llegada, se aparta al llegar (30 días) | pedidos | formula | entrega | | ve la fecha |
-| Ocupar / liberar camas con estancia estimada | ✓ | ✓ | ✓ | | |
-| Citas (cupos según el turno del médico, sin doble agenda) | | su agenda | | ✓ | agenda y cancela |
-| Turnos de atención (C-007, prioridad Ley 1171 de 2007, pantalla sin nombres) | | llama | | ✓ | ve cuántos hay antes |
-| Usuarios (crear con clave temporal, suspender, restablecer) y turnos del personal | ✓ | | | | |
-| Recuperar contraseña (código de 6 dígitos, 15 min, un uso) y modo oscuro | todos | todos | todos | todos | todos |
+| Módulo | Admin | Médico | Enfermería | Facturación | Quirófanos | Paciente |
+|---|---|---|---|---|---|---|
+| Pacientes (registrar, editar, inactivar; correo para el portal) | ✓ | ✓ | | ✓ | | |
+| Ficha del paciente (alergias, antecedentes, cama, fórmulas, citas) | lectura | ✓ edita | lectura | | | la suya |
+| Registros de historia clínica y adjuntos (crear, corregir con versión, anular) | lectura | ✓ | lectura | | | la suya |
+| Buscar historias, descargar PDF, exportar e importar (JSON) | ✓ | ✓ | busca | | | busca en la suya y descarga |
+| Alerta de alergia al formular (penicilinas, AINE, sulfas…) | | ✓ | | | | |
+| Medicamento sin existencias: en espera, fecha de llegada, se aparta al llegar (30 días) | pedidos | formula | entrega | | | ve la fecha |
+| Ocupar / liberar camas con estancia estimada | ✓ | ✓ | ✓ | | ve | |
+| Citas (cupos según el turno del médico, sin doble agenda) | | su agenda | | ✓ | | agenda y cancela |
+| Turnos de atención (C-007, prioridad Ley 1171 de 2007, pantalla sin nombres) | | llama | | ✓ | | ve cuántos hay antes |
+| Usuarios (crear con clave temporal, suspender, restablecer) y turnos del personal | ✓ | | | | | |
+| Quirófanos: capacidad probada por área, lista de espera (HIS + solicitudes), programación sugerida | ve | solicita y quita las suyas en espera | | | ✓ | |
+| Quirófanos: agendar, cancelar con causa, reprogramar, marcar realizada | | | | | ✓ | |
+| Cobertura de personal ahora y sugerencia de reasignación · causa raíz de la espera | ✓ | | | | | |
+| Asistente por voz (micrófono del chat) y respuesta leída en voz alta | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Asistente: adjuntar CSV, Excel, PDF, TXT o imagen y preguntar sobre el archivo | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Eliminar cuentas sin historial (las que tienen historial se inactivan) | ✓ | | | | | |
+| Ingresar con Google · recuperar contraseña · modo oscuro | todos | todos | todos | todos | todos | todos |
+| Crear su propia cuenta (documento + código al correo registrado en admisiones) | | | | | | ✓ |
 
 Cuentas de prueba (contraseña `demo`): `admin`, `dra.ruiz`, `dr.paredes`, `enf.gomez`, `enf.castro`,
-`facturacion.alejandro` (facturación y admisiones: citas y turnos de atención), `paciente.laura`, `paciente.110`. Los cinco pacientes con nombre (Laura, Carlos, María,
+`facturacion.alejandro` (facturación y admisiones: citas y turnos de atención), `quirofanos.bravo` (coordinación de
+quirófanos), `paciente.laura`, `paciente.110`. Para probar el autorregistro: "Soy paciente: crear mi cuenta" con
+documento `1061800222` y correo `maria.ortiz@correo.demo` (sin SMTP el código aparece en pantalla). Los cinco pacientes con nombre (Laura, Carlos, María,
 Juan José y Rosa) son **casos sintéticos** de demostración; los pacientes del extracto llegan anonimizados.
 
 Seguridad añadida: contraseñas nuevas con PBKDF2-SHA256 y sal; política de 8 caracteres con letras y números;
 cambio obligatorio de la clave temporal; códigos de recuperación guardados como huella; la historia clínica,
 las versiones, los adjuntos y los movimientos de camas no se borran (Res. 1995 de 1999); cada búsqueda, descarga,
 exportación e importación queda en la bitácora.
+
+**Reglas de quirófanos** (`surgery_planner.py`): solo coordinación agenda, cancela programadas, reprograma y marca
+realizadas; no se agenda en el pasado ni a más de 90 días, ni dos cirugías del mismo paciente el mismo día; una urgente
+a más de 24 h o un día sin cupos exige justificación (15+ caracteres) que queda guardada; cancelar exige causa y, si es
+para hoy/mañana o la causa es "Otro", detalle. Nada se borra: queda cancelada con quién, cuándo y por qué.
+
+**Ingreso con Google** (opcional): copiar `.streamlit/secrets.toml.example` como `.streamlit/secrets.toml` y poner el
+ID y secreto de un cliente OAuth de Google Cloud (el archivo explica los pasos). Solo entra quien tenga ese correo en
+su cuenta del hospital; tener cuenta de Google no da acceso. Sin ese archivo el botón no aparece.
+
+**Cuenta del paciente**: admisiones registra el correo en los datos del paciente; el paciente escribe su documento y
+ese correo, recibe un código de 6 dígitos (15 min, un uso, 3 por hora) y crea su contraseña. El código llega al correo
+registrado, así nadie abre la cuenta de otro con solo saber su documento.
+
+**Archivos en el asistente**: CSV/Excel se resumen con cifras verificables (filas, columnas, vacíos, mínimo, promedio,
+máximo); las columnas que identifican pacientes (nombre, documento, contacto, diagnóstico) se ocultan antes de mostrar
+o enviar nada a la IA. PDF/TXT: con IA responde la pregunta; sin IA muestra el comienzo. Imágenes: solo con Gemini.
+Los archivos no se guardan.
 
 ## Versión 3: una pantalla por pregunta
 
@@ -146,22 +173,25 @@ muestra a cada rol solo sus secciones:
 6 historias clínicas sobre pacientes e ingresos del extracto (que llegan anonimizados, sin nombre). Las fórmulas y las citas son **sintéticas**.
 El reloj de la cabecera (🕒) cambia a turno nocturno o reinicia el escenario sin tocar la base analítica.
 
-### Guion de demostración (≈4 minutos)
+### Guion de demostración (≈4 min 30 s)
 
-1. **Admin** → Hoy: 86,3 % de camas físicas ocupadas y "Hospitalización 2 al 100 %" con la cama libre más cercana
-   ya ubicada → **Ver camas** → Piso 1. En la burbuja: *"¿Dónde hay camas libres para pediatría en el piso 4?"*.
-2. **Dra. Ruiz** → Clínico y farmacia → Pacientes: registra un paciente nuevo → Historia clínica: crea una
-   consulta con un PDF adjunto, la corrige (queda la versión anterior con el motivo) y la anula (no se borra).
-   Buscar historias: la encuentra por diagnóstico. Prescripción: las unidades quedan **apartadas 30 días**.
-3. **Enf. Gómez** → Entregas y apartados → **"Avanzar el reloj · 30 días"**: las 15 tabletas de acetaminofén y
-   las 10 de enoxaparina que nadie reclamó vuelven a disponibles. La enoxaparina, de continuidad crítica, genera
-   una alerta en lugar de un bloqueo.
-4. **Paciente 110** → la campana avisa "Tu fórmula venció" → Mis fórmulas y citas → "Solicitar cita".
-5. **Dra. Ruiz** → Prescripción: "Atender cita" levanta el bloqueo.
-6. Reloj → **Turno de noche** → Historias: el acceso queda bloqueado → "Romper el vidrio" con justificación.
-7. **Admin** → Datos y auditoría → Bitácora: el acceso de emergencia aparece registrado.
+Antes de cada ensayo: reloj → "Reiniciar escenario clínico" y levantar los microservicios.
 
-Antes de cada ensayo usa "↺ Reiniciar escenario clínico".
+1. **Admin → Hoy (20 s):** 86,3 % de camas físicas, "Hospitalización 2 al 100 %" con la cama libre más cercana.
+2. **Asistente IA (1 min 15 s):** las 4 preguntas del reto con los botones; una de ellas **por voz** (micrófono
+   del chat) y "Escuchar" la respuesta. Abrir "Trazabilidad" para mostrar el SQL. Escribir `borra la tabla de
+   ingresos` para mostrar el bloqueo.
+3. **Indicadores → Urgencias y espera (20 s):** "¿Por qué cambió la espera?" (causa raíz por turno y triage).
+   **Personal y turnos → Cobertura ahora (15 s):** la sugerencia de a quién mover.
+4. **Quirófanos (40 s):** cumplimiento 97 %, lista de espera de 41 (40 del HIS sin ejecutar + 1 urgencia),
+   gráfico de carga vs. capacidad probada → "Confirmar la programación". La urgencia queda para mañana.
+5. **Dra. Ruiz → Clínico y farmacia (40 s):** buscar "Laura" → ficha con **alergia a penicilina** → Prescripción:
+   amoxicilina → alerta roja de alergia. Descargar la historia en PDF.
+6. **Paciente Laura (30 s):** claritromicina "en espera de existencias, llega el 24 de septiembre".
+   **Admin → Inventario → Llegada de pedido:** registrar la claritromicina → queda apartada 30 días para ella.
+7. **Facturación · Alejandro (30 s):** Citas del día → Carlos ya tiene turno C-001 → **Dra. Ruiz → Mi agenda →
+   Llamar al siguiente**.
+8. **Reloj → Turno de noche (20 s):** la historia queda bloqueada → "Romper el vidrio" → aparece en la bitácora.
 
 ## Arquitectura
 
@@ -305,45 +335,41 @@ Estas decisiones salieron de perfilar el extracto antes de programar; conviene m
 
 ## Guía para el pitch (7 minutos)
 
-**1. Problema (45 s).** "Cada mañana un jefe de servicio pide a TI un reporte que llega tarde. Mientras tanto,
-hoy la hospitalización 2 está al 100 %." Mostrar la pestaña de alertas.
+**1. Problema (40 s).** "El hospital atiende ~500 pacientes al día con la información repartida entre HC, farmacia,
+admisiones y hojas de cálculo. El jefe de servicio pide un reporte a TI y llega tarde; mientras tanto, hoy
+Hospitalización 2 está al 100 %."
 
-**2. Solución (30 s).** Un asistente que responde en segundos con datos, gráfico y acción recomendada.
+**2. Solución (30 s).** Un centro de mando con un asistente de IA que responde en lenguaje natural (escrito o por
+voz) sobre el extracto del HIS del reto (más de 1,2 millones de registros, datos sintéticos), con tablero,
+alertas y la operación diaria conectada: camas, farmacia, historia clínica, citas, turnos y quirófanos.
 
-**3. Demo con las 4 preguntas (3 min).** Usar los botones del asistente y abrir el SQL de al menos una:
+**3. Demo (4 min 30 s).** Seguir el guion de arriba. Las 4 preguntas del reto van primero.
 
-| Pregunta | Respuesta con los datos del reto |
-|---|---|
-| ¿Cuántas camas de UCI están ocupadas hoy? | 26 de 37 camas físicas (70,3 %); la UCI neonatal está al 86,7 % |
-| ¿Medicamentos con menos de 5 días de inventario? | 47 medicamentos (stock simulado, consumo real); el más crítico, cloruro de sodio 20 mEq, con 1 día |
-| ¿Espera promedio en urgencias la última semana? | 1 h 0 min en 796 atenciones; Triage 2 espera 46 min frente a la meta de 30 |
-| ¿Qué servicio tiene más pacientes este mes? | Urgencias, con 1.093 pacientes (44,4 %); le sigue Pediatría con 405 |
+**4. Valor añadido (45 s).**
+- Causa raíz de la espera y recomendación de reasignar personal (lo piden los puntos 7 y h del reto).
+- Quirófanos: programación de la lista de espera según la capacidad que cada área ya demostró operar.
+- Pronósticos por servicio con su nivel de confianza e informe gerencial en PDF.
+- Seguridad clínica real: alergias, medicamento apartado 30 días, historia que no se borra, bitácora.
 
-Cierre de la demo: cambiar el motor a "Solo reglas (Plan B)" y repetir una pregunta para mostrar que la demo
-no depende de internet. Luego escribir `DROP TABLE ingresos` (o "borra la tabla de ingresos") para mostrar el
-bloqueo de seguridad.
+**5. Arquitectura y tecnologías (30 s).** Streamlit → FastAPI → agente NL2SQL (Gemini/OpenAI/Claude/modelo local,
+con respaldo de consultas verificadas) → SQLite (analítica de solo lectura + base clínica transaccional) y 4
+microservicios predictivos.
 
-**4. Valor añadido (1 min).** Causa raíz (el turno de la tarde concentra la mayor espera, con 73 % de Triage 3),
-alerta temprana (respiratorio +18 % → revisar antibióticos), orden de compra descargable y balance de
-quirófanos (viernes 92 cirugías frente a 54 los lunes).
+**6. Limitaciones y mejoras (15 s).** Ver la sección siguiente.
 
-**5. Arquitectura y tecnologías (45 s).** Diagrama de este README. Streamlit (tablero y chat en Python puro),
-FastAPI (integración con el HIS), SQLite (cero instalación), LLM intercambiable por Factory.
-
-**6. Limitaciones y mejoras (45 s).** Ver la sección siguiente. Terminar con la mejora 1: modelo local.
+**Frases que aguantan preguntas:** "trabajamos sobre el extracto del reto, no conectados en vivo al HIS"; "los
+pacientes con nombre son casos sintéticos, el agente nunca devuelve datos identificables"; "lo que no sabemos
+(salas, horas de cirugía, dotación real) no lo inventamos: lo decimos".
 
 **Preguntas probables del jurado**
 
 - *¿Y si el LLM inventa un SQL peligroso?* Tres barreras: filtro, conexión de solo lectura y authorizer del motor.
-- *¿Por qué la ocupación histórica de UCI es baja?* Explicar el sesgo de "última cama" y la serie de días-cama.
-- *¿El stock es real?* No; está marcado como simulado y se reemplaza con un archivo de farmacia.
-- *¿Por qué SQLite y no PostgreSQL?* Es la opción recomendada por el reto: sin servidor, la demo arranca en
-  cualquier equipo. El acceso a datos está aislado en `database.py`; migrar es cambiar la conexión.
-- *El modelo sugerido traía fecha de salida, médico asignado y fecha de vencimiento, ¿dónde están?* No existen
-  en el extracto entregado. Por eso la estancia se estima y el stock se simula, y así se declara en pantalla.
-- *¿Hay login?* Sí: usuario y contraseña contra `clinico.db`, solo cuentas activas, bloqueo de 15 minutos tras
-  5 intentos fallidos y cada intento en la bitácora (`auth.py`). La demo usa sha256; en producción, argon2/bcrypt y
-  sesión con JWT. Los permisos se validan en el servidor en cada página y en el asistente.
+- *¿Y si no hay internet o se cae la IA?* Responde el respaldo de consultas verificadas (Plan B), sin red.
+- *¿Cómo programan quirófanos si no hay salas ni horas?* Capacidad en cirugías/día por área (percentil 90 de lo
+  realizado); con salas y horarios, el mismo optimizador asigna por franja.
+- *¿El stock es real?* El consumo sí; las existencias iniciales son simuladas y así se marca en pantalla.
+- *¿Por qué SQLite?* Es la opción recomendada por el reto; el acceso a datos está aislado para migrar.
+- *¿Hay login?* Sí: roles, bloqueo por intentos, PBKDF2 con sal, recuperación con código y bitácora de todo.
 
 ## Limitaciones y mejoras futuras
 

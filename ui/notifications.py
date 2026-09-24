@@ -208,6 +208,23 @@ def _backorders(clin: sqlite3.Connection) -> list[Notification]:
     return out
 
 
+def _surgery(clin: sqlite3.Connection, now: str) -> list[Notification]:
+    out = []
+    urgent = clin.execute("SELECT COUNT(*) FROM cirugias_solicitudes WHERE estado = 'EN_ESPERA' AND prioridad = 'URGENTE'"
+                          ).fetchone()[0]
+    if urgent:
+        out.append(Notification(f"qx_urg:{urgent}", "crítica", _n(urgent, "cirugía urgente sin programar",
+                                                                    "cirugías urgentes sin programar"),
+                                "Deben operarse en máximo 24 horas.", "quirofanos", "Programar"))
+    today = clin.execute("SELECT COUNT(*) FROM cirugias_solicitudes WHERE estado = 'PROGRAMADA' AND fecha_programada = ?",
+                         (now[:10],)).fetchone()[0]
+    if today:
+        out.append(Notification(f"qx_hoy:{now[:10]}:{today}", "info", _n(today, "cirugía programada hoy",
+                                                                          "cirugías programadas hoy"),
+                                "Márcalas como realizadas al terminar.", "quirofanos", "Ver"))
+    return out
+
+
 def collect(role: str, user: dict, clin: sqlite3.Connection, analytics: sqlite3.Connection, now: str,
             alerts: list) -> list[Notification]:
     """Notificaciones del usuario, ordenadas por severidad. Cada rol ve solo lo que puede atender."""
@@ -219,6 +236,8 @@ def collect(role: str, user: dict, clin: sqlite3.Connection, analytics: sqlite3.
         items = _doctor(clin, user["id"]) + _triage(analytics, now) + _hospital(alerts, {"Ocupación"}, to_beds)
     elif role == "ENFERMERIA":
         items = _nurse(clin, now) + _triage(analytics, now) + _hospital(alerts, {"Ocupación", "Farmacia"}, to_beds, clin)
+    elif role == "QUIROFANOS":
+        items = _surgery(clin, now)
     elif role == "PACIENTE":
         items = _patient(clin, user["id_paciente"], now)
     else:

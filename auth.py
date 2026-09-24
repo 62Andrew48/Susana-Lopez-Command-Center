@@ -181,3 +181,113 @@ def reset_with_code(conn: sqlite3.Connection, identifier: str, code: str, new: s
     with conn:
         conn.execute("UPDATE recuperacion_clave SET usado_en = ? WHERE id = ?", (now, row["id"]))
     _set_password(conn, user["id"], new, now, "CLAVE_RECUPERADA")
+
+
+# ---------------------------------------------------------------------------
+# Ingreso con Google (OpenID Connect vía st.login). Google ya verificó el correo; aquí solo se decide si ese
+# correo corresponde a UNA cuenta activa del hospital. Nadie entra por existir en Google.
+# ---------------------------------------------------------------------------
+GOOGLE_NOT_LINKED = ("Tu cuenta de Google no está vinculada a ningún usuario del hospital. El personal debe pedirle "
+                     "al administrador que registre ese correo; los pacientes pueden crear su cuenta abajo.")
+
+
+def login_google(conn: sqlite3.Connection, email: str, now: str, verified: bool = True) -> LoginResult:
+    email = (email or "").strip().lower()
+    if not email or not verified:
+        return LoginResult(None, "Google no confirmó el correo de la cuenta.")
+    with conn:
+        rows = conn.execute("SELECT * FROM usuarios WHERE lower(correo) = ?", (email,)).fetchall()
+        if len(rows) != 1:
+            detail = "sin usuario" if not rows else "correo repetido en varias cuentas"
+            _audit(conn, None, "LOGIN_FALLIDO", f"Google: {email[:60]} ({detail})", now)
+            return LoginResult(None, GOOGLE_NOT_LINKED if not rows else
+                               "Ese correo está en varias cuentas; pide al administrador que lo corrija.")
+        user = rows[0]
+        if user["estado_cuenta"] != "ACTIVO":
+            _audit(conn, user["id"], "LOGIN_FALLIDO", f"Google: cuenta {user['estado_cuenta'].lower()}", now)
+            return LoginResult(None, f"La cuenta está {user['estado_cuenta'].lower().replace('_', ' ')}. "
+                                     "Contacta al administrador.")
+        conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueado_hasta = NULL, ultimo_acceso = ? "
+                     "WHERE id = ?", (now, user["id"]))
+        _audit(conn, user["id"], "LOGIN_OK", "Inicio de sesión con Google", now)
+    return LoginResult(user["id"], "ok")
+
+
+# ---------------------------------------------------------------------------
+# Cuenta del paciente en el portal: documento + el correo que registró admisiones. El código llega a ESE correo,
+# así nadie puede abrir la cuenta de otro solo con saber su documento.
+# ---------------------------------------------------------------------------
+SIGNUP_GENERIC = ("Si el documento y el correo coinciden con los registrados en admisiones, te enviamos un código de "
+                  f"6 dígitos que vence en {CODE_MINUTES} minutos.")
+
+
+def _signup_hash(id_paciente: int, code: str) -> str:
+    return hashlib.sha256(f"hslv-registro-{id_paciente}-{code}".encode()).hexdigest()
+
+
+def _signup_patient(conn: sqlite3.Connection, documento: str, correo: str):
+    doc = "".join((documento or "").split())
+    mail = (correo or "").strip().lower()
+    if not doc or not mail:
+        return None
+    return conn.execute("SELECT * FROM pacientes_clinicos WHERE numero_documento = ? AND lower(correo) = ? "
+                        "AND estado = 'ACTIVO'", (doc, mail)).fetchone()
+
+
+def request_signup(conn: sqlite3.Connection, documento: str, correo: str, now: str) -> tuple[int | None, str | None]:
+    """Devuelve (id_paciente, código) si procede; (None, None) si no (la pantalla responde igual en ambos casos).
+    Errores explícitos solo cuando ya hay cuenta o se excede el límite de códigos."""
+    patient = _signup_patient(conn, documento, correo)
+    if patient is None:
+        with conn:
+            _audit(conn, None, "REGISTRO_PACIENTE", "Documento/correo sin coincidencia", now)
+        return None, None
+    pid = patient["id_paciente"]
+    if conn.execute("SELECT 1 FROM usuarios WHERE id_paciente = ? OR lower(correo) = ?",
+                    (pid, patient["correo"].lower())).fetchone():
+        raise sqlite3.IntegrityError("Ya existe una cuenta con esos datos. Usa \"¿Olvidaste tu contraseña?\".")
+    hour_ago = (datetime.strptime(now, FMT) - timedelta(hours=1)).strftime(FMT)
+    if conn.execute("SELECT COUNT(*) FROM registro_pacientes WHERE id_paciente = ? AND creado_en > ?",
+                    (pid, hour_ago)).fetchone()[0] >= CODES_PER_HOUR:
+        raise sqlite3.IntegrityError("Ya se enviaron varios códigos en la última hora. Espera un momento.")
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires = (datetime.strptime(now, FMT) + timedelta(minutes=CODE_MINUTES)).strftime(FMT)
+    with conn:
+        conn.execute("UPDATE registro_pacientes SET usado_en = ? WHERE id_paciente = ? AND usado_en IS NULL",
+                     (now, pid))
+        conn.execute("INSERT INTO registro_pacientes(id_paciente, correo, codigo_hash, creado_en, expira_en) "
+                     "VALUES (?,?,?,?,?)", (pid, patient["correo"].lower(), _signup_hash(pid, code), now, expires))
+        _audit(conn, None, "REGISTRO_PACIENTE", f"Código de registro generado (paciente {pid})", now)
+    return pid, code
+
+
+def complete_signup(conn: sqlite3.Connection, documento: str, correo: str, code: str, password: str,
+                    now: str) -> int:
+    """Valida el código y crea la cuenta PACIENTE (usuario = correo) vinculada a su registro. Devuelve el id."""
+    patient = _signup_patient(conn, documento, correo)
+    row = None if patient is None else conn.execute(
+        "SELECT * FROM registro_pacientes WHERE id_paciente = ? AND usado_en IS NULL ORDER BY id DESC LIMIT 1",
+        (patient["id_paciente"],)).fetchone()
+    if row is None or row["expira_en"] < now or row["intentos"] >= CODE_ATTEMPTS:
+        raise sqlite3.IntegrityError("El código no es válido o ya venció. Solicita uno nuevo.")
+    if not hmac.compare_digest(row["codigo_hash"], _signup_hash(patient["id_paciente"], (code or "").strip())):
+        with conn:
+            conn.execute("UPDATE registro_pacientes SET intentos = intentos + 1 WHERE id = ?", (row["id"],))
+        raise sqlite3.IntegrityError("El código no es válido o ya venció. Solicita uno nuevo.")
+    problem = password_problem(password)
+    if problem:
+        raise sqlite3.IntegrityError(problem)
+    mail = patient["correo"].lower()
+    if conn.execute("SELECT 1 FROM usuarios WHERE id_paciente = ? OR lower(usuario) = ? OR lower(correo) = ?",
+                    (patient["id_paciente"], mail, mail)).fetchone():
+        raise sqlite3.IntegrityError("Ya existe una cuenta con esos datos. Usa \"¿Olvidaste tu contraseña?\".")
+    name = " ".join(filter(None, [patient["nombres"].split()[0], (patient["apellidos"] or "").split()[0]
+                                  if patient["apellidos"] else None]))
+    with conn:
+        role = conn.execute("SELECT id FROM roles WHERE codigo = 'PACIENTE'").fetchone()[0]
+        uid = conn.execute("INSERT INTO usuarios(usuario, hash_password, nombre_mostrado, rol_id, estado_cuenta, "
+                           "id_paciente, correo, creado_en) VALUES (?,?,?,?, 'ACTIVO', ?, ?, ?)",
+                           (mail, hash_password(password), name, role, patient["id_paciente"], mail, now)).lastrowid
+        conn.execute("UPDATE registro_pacientes SET usado_en = ? WHERE id = ?", (now, row["id"]))
+        _audit(conn, uid, "CUENTA_PACIENTE_CREADA", "Autorregistro verificado por correo", now)
+    return uid

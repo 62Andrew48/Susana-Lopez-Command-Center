@@ -18,10 +18,13 @@ import time
 import unicodedata
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 import auth
 import database as db
 from agent import AgentResponse
+import file_assistant
+import voice
 from ui import context as ctx
 from ui.session import LOGO_ICON
 from ui import assistant_scope as scope_mod
@@ -129,7 +132,59 @@ def ask(question: str) -> AgentResponse:
 ENGINE_SHORT = {"llm": "IA", "reglas": "Respuesta verificada", "reglas (respaldo)": "Respuesta verificada",
                 "seguridad": "Bloqueado", "sql directo": "Consulta validada", "mapa de camas": "Mapa de camas",
                 "glosario": "Glosario", "mis datos": "Solo tus datos", "fuera de alcance": "Acceso limitado",
-                "modelo predictivo": "Modelo predictivo"}
+                "modelo predictivo": "Modelo predictivo", "archivo": "Análisis del archivo"}
+
+
+def prompt_text(value) -> str | None:
+    """Texto del chat: lo escrito o, si se grabó audio con el micrófono, su transcripción."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    text = (getattr(value, "text", "") or "").strip()
+    audio = getattr(value, "audio", None)
+    if audio is not None:
+        heard, engine = voice.transcribe(audio.getvalue())
+        if heard:
+            st.toast(f"Te escuché: “{heard}”", icon=":material/mic:")
+            return f"{text} {heard}".strip()
+        st.warning(engine)
+    return text or None
+
+
+def can_upload() -> bool:
+    """Subir archivos al asistente: personal del hospital (el paciente solo consulta sus propios datos)."""
+    return _scope().code not in ("paciente", "ninguno")
+
+
+def chat_box(placeholder: str, key: str | None = None):
+    """st.chat_input con micrófono y, para el personal, adjuntar archivos (CSV, Excel, PDF, TXT, imagen)."""
+    extra = {"accept_file": True, "file_type": file_assistant.FILE_TYPES} if can_upload() else {}
+    return st.chat_input(placeholder, key=key, accept_audio=True, **extra)
+
+
+def attached_file(value):
+    files = getattr(value, "files", None) or []
+    return files[0] if files else None
+
+
+def submit(value, pending: str | None = None) -> tuple[str, AgentResponse] | None:
+    """Procesa lo que llegó del chat: texto, voz o archivo. Devuelve (lo que se muestra como pregunta, respuesta)."""
+    file = attached_file(value)
+    prompt = prompt_text(value) or (None if file else pending)
+    if file is not None:
+        t0 = time.time()
+        resp = file_assistant.answer(prompt or "", file.name, file.getvalue(), getattr(file, "type", None))
+        resp.elapsed_ms = int((time.time() - t0) * 1000)
+        return f"[Archivo: {file.name}] {prompt or 'Resume este archivo.'}", resp
+    if not prompt:
+        return None
+    return prompt, ask(prompt)
+
+
+def speak(resp: AgentResponse, key: str) -> None:
+    """Botón para escuchar la respuesta (voz del navegador)."""
+    components.html(voice.speak_widget(resp.answer, key), height=42)
 
 
 def _render(resp: AgentResponse, idx: int) -> None:
@@ -186,14 +241,18 @@ def _bubble() -> None:
                     st.markdown(f'<div class="ia-me">{esc(question)}</div>', unsafe_allow_html=True)
                     with st.chat_message("assistant", avatar=str(LOGO_ICON)):
                         _render(resp, i)
-            prompt = st.chat_input("Escribe tu pregunta…", key="ia_input")
-            prompt = prompt or st.session_state.pop("ia_pending", None)
-            if prompt:
+                        if i == len(history) - 1:
+                            speak(resp, f"b{i}")
+            value = chat_box("Escribe, graba o adjunta un archivo…" if can_upload() else "Escribe o graba tu pregunta…",
+                             key="ia_input")
+            pending = st.session_state.pop("ia_pending", None)
+            if value is not None or pending:
                 with thread:
-                    st.markdown(f'<div class="ia-me">{esc(prompt)}</div>', unsafe_allow_html=True)
                     with st.spinner("Buscando la respuesta…"):
-                        history.append((prompt, ask(prompt)))
-                st.rerun(scope="fragment")
+                        result = submit(value, pending)
+                if result:
+                    history.append(result)
+                    st.rerun(scope="fragment")
             if history:
                 c1, c2 = st.columns(2)
                 if "asistente" in ctx.PAGES:

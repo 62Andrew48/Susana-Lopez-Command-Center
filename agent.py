@@ -268,8 +268,28 @@ class OllamaClient(LLMClient):
         return r.json()["message"]["content"]
 
 
+class GeminiClient(LLMClient):
+    """Google Gemini (hay capa gratuita: clave en https://aistudio.google.com/apikey)."""
+    name = "gemini"
+
+    def complete(self, system, messages):
+        contents = [{"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+                    for m in messages]
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent",
+            headers={"x-goog-api-key": config.GEMINI_API_KEY},
+            json={"systemInstruction": {"parts": [{"text": system}]}, "contents": contents,
+                  "generationConfig": {"temperature": 0}},
+            timeout=config.LLM_TIMEOUT_SECONDS)
+        r.raise_for_status()
+        parts = r.json()["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts)
+
+
 def create_llm_client(provider: str | None = None) -> LLMClient | None:
     provider = (provider or config.LLM_PROVIDER).lower()
+    if provider == "gemini" and config.GEMINI_API_KEY:
+        return GeminiClient()
     if provider == "openai" and config.OPENAI_API_KEY:
         return OpenAIClient()
     if provider == "anthropic" and config.ANTHROPIC_API_KEY:

@@ -110,9 +110,8 @@ def page_atencion() -> None:
         tabs.append("Mi agenda"); views.append(_doctor_agenda)
     if ctx.can("citas.gestionar"):
         tabs += ["Agendar cita", "Citas del día"]; views += [_book_tab, _day_tab]
-    if ctx.can("turnos_atencion.gestionar"):
-        tabs.append("Fila de turnos"); views.append(_queue_tab)
-    tabs.append("Pantalla de turnos"); views.append(_screen)
+    if ctx.can("citas.gestionar"):  # la fila general y la pantalla de sala son de facturación/admisiones
+        tabs += ["Fila de turnos", "Pantalla de turnos"]; views += [_queue_tab, _screen]
     for tab, view in zip(st.tabs(tabs), views):
         with tab:
             view()
@@ -244,6 +243,12 @@ def _doctor_agenda() -> None:
         t = sch.call_next(clin, servicio="CONSULTA", modulo=module, by=ctx.user_id(), now=ctx.clock(),
                           medico_id=ctx.user_id())
         st.toast(f"Llamando {t['codigo']}" if t else "Nadie en espera para ti", icon=":material/campaign:")
+    mine = [t for t in sch.board(clin, ctx.clock()[:10], "CONSULTA")
+            if t["estado"] in ("EN_ESPERA", "LLAMADO", "EN_ATENCION") and t["medico"] == ctx.current_user()["nombre_mostrado"]]
+    if mine:
+        st.markdown("**Tus pacientes en la sala de espera:** " + " ".join(
+            chip(f"{t['codigo']} · {t['paciente']}" + (" · llamado" if t["estado"] == "LLAMADO" else ""),
+                 "ok" if t["estado"] == "LLAMADO" else "info") for t in mine), unsafe_allow_html=True)
     if not rows:
         st.info("No tienes citas en este rango.")
         return

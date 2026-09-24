@@ -23,7 +23,7 @@ CLINICAL_DB = BASE_DIR / "clinico.db"
 # Grupos ATC cuya suspensión abrupta es riesgosa: no se bloquean, se alertan
 CONTINUITY_ATC_PREFIXES = ("A10A", "B01A", "N03A", "J05A", "H02AB", "C01AA", "L04A")
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
-SCHEMA_VERSION = 6          # debe coincidir con el PRAGMA user_version del final de schema_clinico.sql
+SCHEMA_VERSION = 9          # debe coincidir con el PRAGMA user_version del final de schema_clinico.sql
 RESERVE_DAYS = 30           # las unidades formuladas quedan apartadas para el paciente durante 30 días
 RESERVE_HOURS = RESERVE_DAYS * 24
 
