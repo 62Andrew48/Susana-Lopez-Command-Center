@@ -35,7 +35,22 @@ def test_bed_location_reads_floor_room_and_bed(code, floor, room, bed):
 def test_bed_location_without_room_pattern_uses_unit(code):
     loc = db.bed_location(code, "UNIDAD DE CUIDADOS INTENSIVOS ADULTOS")
     assert loc["piso"] is None and loc["habitacion"] is None
-    assert "Unidad De Cuidados Intensivos Adultos" in loc["ubicacion"]
+    assert "Unidad de Cuidados Intensivos Adultos" in loc["ubicacion"]
+
+
+def test_unit_label_is_readable():
+    assert db.unit_label("UNIDAD DE CUIDAD BASICO NEONATAL") == "Unidad de Cuidado Básico Neonatal"
+    assert db.unit_label("HOSPITALIZACION 2") == "Hospitalización 2"
+
+
+def test_occupancy_uses_physical_beds_everywhere(conn):
+    """Tarjeta de Indicadores, agente y alertas usan la misma capacidad física que Hoy y el mapa."""
+    occ = db.kpi_global_occupancy(conn, REF)
+    beds = db.bed_map(conn, REF)
+    phys = beds[(beds["es_virtual"] == 0) & (beds["servicio"] != "Urgencias")]
+    assert (occ["capacidad"], occ["ocupadas"]) == (len(phys), int(phys["ocupada"].sum()))
+    h3 = db.kpi_bed_occupancy(conn, REF, by="subgrupo_cama").query("subgrupo_cama == 'HOSPITALIZACION 3'")
+    assert h3["capacidad"].iat[0] == 43, "las 95 camas virtuales de Hospitalización 3 no son capacidad"
 
 
 def test_population_keeps_units_apart():
@@ -52,7 +67,7 @@ def test_bed_map_matches_daily_occupancy(conn):
     """El mapa y el tablero no pueden contradecirse: misma regla de ocupación por unidad."""
     beds = db.bed_map(conn, REF)
     assert len(beds) == conn.execute("SELECT COUNT(*) FROM camas").fetchone()[0]
-    by_unit = beds.groupby("subgrupo_cama")["ocupada"].sum()
+    by_unit = beds[beds["es_virtual"] == 0].groupby("subgrupo_cama")["ocupada"].sum()  # ocupación = camas físicas
     for sub, occupied in conn.execute(
             "SELECT subgrupo_cama, camas_ocupadas FROM ocupacion_diaria WHERE fecha = ?", (REF.isoformat(),)):
         assert by_unit.get(sub, 0) == occupied, sub
@@ -156,9 +171,35 @@ def test_roles_receive_only_their_categories(clin, conn):
     doctor = {n.title for n in _notes(clin, conn, 2, "2026-09-21 10:00:00", alerts)}
     nurse = {n.title for n in _notes(clin, conn, 3, "2026-09-21 10:00:00", alerts)}
     admin = {n.title for n in _notes(clin, conn, 1, "2026-09-21 10:00:00", alerts)}
-    assert "Hosp 2" in doctor and "64 ítems" not in doctor and "Pico" not in doctor
-    assert {"Hosp 2", "64 ítems"} <= nurse and "Pico" not in nurse
-    assert {"Hosp 2", "64 ítems", "Pico"} <= admin
+    pharmacy = next(t for t in admin if "se agotan" in t)       # farmacia sale del inventario vivo
+    assert "Hosp 2" in doctor and pharmacy not in doctor and "Pico" not in doctor
+    assert {"Hosp 2", pharmacy} <= nurse and "Pico" not in nurse
+    assert {"Hosp 2", pharmacy, "Pico"} <= admin and "64 ítems" not in admin
+
+
+def test_receiving_orders_updates_pharmacy_alert(clin, conn):
+    import pharmacy_service as ps
+    from ui.notifications import _pharmacy_live
+    before = clin.execute("SELECT COUNT(*) FROM v_semaforo_stock WHERE semaforo = 'ROJO'").fetchone()[0]
+    assert before > 0 and str(before) in _pharmacy_live(clin).title
+    for r in ps.stock_semaphore(clin, ("ROJO",)):
+        ps.receive_stock(clin, r["codigo"], max(int(r["orden_sugerida_15d"]), 1), 1, "prueba", "2026-09-21 11:00:00")
+    assert _pharmacy_live(clin) is None, "tras recibir la orden ya no quedan urgentes"
+
+
+def test_inventory_adjustment_goes_through_ledger(clin):
+    import sqlite3
+
+    import pharmacy_service as ps
+    code = ps.inventory(clin)[0]["codigo"]
+    before = clin.execute("SELECT disponible FROM v_stock WHERE codigo = ?", (code,)).fetchone()[0]
+    delta = ps.adjust_stock(clin, code, before + 7, 1, "Conteo semanal", "2026-09-21 12:00:00")
+    assert delta == 7
+    assert clin.execute("SELECT disponible FROM v_stock WHERE codigo = ?", (code,)).fetchone()[0] == before + 7
+    with pytest.raises(sqlite3.IntegrityError):
+        ps.adjust_stock(clin, code, 3, 1, "", "2026-09-21 12:00:00")   # sin motivo no hay ajuste
+    with pytest.raises(sqlite3.IntegrityError):
+        clin.execute("UPDATE inventario_movimientos SET delta_disponible = 0")  # el libro mayor es inmutable
 
 
 # --- Glosario en lenguaje sencillo ------------------------------------------------------

@@ -105,7 +105,8 @@ def test_cannot_overdispense_or_dispense_after_window(db):
     pid = prescribe(db, units=5)
     with pytest.raises(sqlite3.IntegrityError, match="supera"):
         with db:
-            db.execute("INSERT INTO dispensaciones(prescripcion_id,usuario_id,cantidad) VALUES (?,3,6)", (pid,))
+            db.execute("INSERT INTO dispensaciones(prescripcion_id,usuario_id,cantidad,fecha) "
+                       "VALUES (?,3,6,'2026-09-21 10:00:00')", (pid,))  # fecha fija: no depende del reloj real
     with pytest.raises(sqlite3.IntegrityError, match="ventana"):
         with db:
             db.execute("INSERT INTO dispensaciones(prescripcion_id,usuario_id,cantidad,fecha) "

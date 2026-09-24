@@ -14,9 +14,11 @@ import streamlit as st
 import config
 import database as db
 import pharmacy_service as ps
+import reports
 from agent import KEY_QUESTIONS, AgentResponse, fmt_minutes, fmt_num
 from ui import chat_bubble as chat
 from ui import context as ctx
+from ui.session import LOGO_ICON
 from ui.theme import (AMBER, ACTIVITY_SEQ, BLUE, BLUE_LIGHT, BORDER, EMERALD, GREY, MUTED, RED, SEVERITY,
                       banner, card, chip, esc, grid, kpi_card, occupancy_color, section_title, severity_pill,
                       short_labels, show, style_fig)
@@ -74,29 +76,30 @@ def page_tablero() -> None:
                      tone=EMERALD if (pct or 0) >= config.SURGERY_COMPLIANCE_MIN_PCT else AMBER),
             kpi_card("Ingresos", fmt_num(total_adm), f"{fmt_num(total_adm / span, 1)} por día", tone=BLUE),
         ]) + "</div>", unsafe_allow_html=True)
-        critical = [a for a in ctx.get_agent().alerts() if a.severity == "crítica"]
+        critical = [a for a in ctx.alerts() if a.severity == "crítica"]
         if critical:
             c1, c2 = st.columns([3, 1], vertical_alignment="center")
             c1.markdown(chip(f"{len(critical)} alertas críticas activas", "danger", "●") + " "
                         + " · ".join(esc(a.title) for a in critical[:2]), unsafe_allow_html=True)
             if "alertas" in ctx.PAGES:
-                c2.page_link(ctx.PAGES["alertas"], label="Ver acciones recomendadas", icon="🚨")
+                c2.page_link(ctx.PAGES["alertas"], label="Ver acciones recomendadas", icon=":material/arrow_forward:")
 
     # --- 1.2 y 1.3 en sub-pestañas ---
     if beds:
-        tab_trend, tab_beds, tab_er = st.tabs(["📈 Tendencias", "🛏️ Capacidad y camas",
-                                               "⏱️ Urgencias y tiempos de espera"])
-        with tab_trend:
-            _trends_section(start, end)
-        with tab_beds:
-            _beds_section(end)
-        with tab_er:
-            _emergency_section(start, end)
+        # Selector en lugar de pestañas: st.tabs calcula TODAS las secciones en cada clic; así solo la visible.
+        sections = {"Tendencias": lambda: _trends_section(start, end), "Capacidad y camas": lambda: _beds_section(end),
+                    "Urgencias y espera": lambda: _emergency_section(start, end),
+                    "Consumo de medicamentos": lambda: _consumption_section(start, end),
+                    "Ingresos": lambda: _admissions_list(start, end)}
+        choice = st.segmented_control("Sección", list(sections), default="Tendencias", key="ind_section",
+                                      label_visibility="collapsed") or "Tendencias"
+        sections[choice]()
 
     # --- 1.4 colapsable ---
     if managerial:
-        with st.expander("📈 Epidemiología y producción", expanded=False):
-            _epidemiology_section(start, end)
+        with st.expander("Epidemiología y producción", expanded=False):
+            if st.toggle("Mostrar", key="show_epi"):
+                _epidemiology_section(start, end)
 
     if not (managerial or beds):
         st.info("Tu rol no tiene indicadores asignados en el tablero.")
@@ -108,7 +111,7 @@ def _beds_section(end) -> None:
     left, right = st.columns([1.15, 1], gap="medium")
     with left:
         fig = go.Figure(go.Bar(
-            x=occ["porcentaje_ocupacion"], y=occ["subgrupo_cama"].str.title(), orientation="h",
+            x=occ["porcentaje_ocupacion"], y=occ["subgrupo_cama"].map(db.unit_label), orientation="h",
             marker_color=[occupancy_color(p) for p in occ["porcentaje_ocupacion"]],
             text=[f"{int(o)}/{int(c)}" for o, c in zip(occ["camas_ocupadas"], occ["capacidad"])],
             textposition="outside", textfont=dict(size=11, color=MUTED), cliponaxis=False,
@@ -184,6 +187,49 @@ def _trends_section(start, end) -> None:
                f"({fmt_num(config.OCCUPANCY_WARNING_PCT)} %). La ocupación usa camas físicas, igual que la página Hoy.")
 
 
+def _consumption_section(start, end) -> None:
+    """Mayor y menor rotación de medicamentos e insumos en el periodo (dispensación real del HIS)."""
+    kind = st.segmented_control("Tipo", ["Medicamento", "Insumo / dispositivo"], default="Medicamento",
+                                key="cons_kind") or "Medicamento"
+    left, right = st.columns(2, gap="medium")
+    for col, lowest, title, color in ((left, False, "Mayor rotación", BLUE), (right, True, "Menor rotación", GREY)):
+        with col:
+            df = ctx.cached("kpi_item_consumption", start, end, 10, item_type=kind, lowest=lowest)
+            if df.empty:
+                st.caption("Sin dispensaciones en el periodo.")
+                continue
+            df = df.assign(item=short_labels(df["nombre"].str.capitalize(), 42)).sort_values(
+                "unidades", ascending=lowest)
+            fig = go.Figure(go.Bar(x=df["unidades"], y=df["item"], orientation="h", marker_color=color,
+                                   hovertemplate="%{y}: %{x:,.0f} unidades<extra></extra>"))
+            fig.update_xaxes(title="unidades dispensadas")
+            show(style_fig(fig, 380, title), key=f"cons_{lowest}")
+    st.caption("Unidades dispensadas en el periodo del menú lateral. Los ítems sin ningún movimiento no aparecen "
+               "aquí; se consultan en Inventario.")
+
+
+def _admissions_list(start, end) -> None:
+    """Listado de ingresos sin datos sensibles (sin nombre, documento, ni identificadores)."""
+    lo, hi = db.day_bounds(start, end)
+    df = pd.read_sql_query("""
+        SELECT date(fecha_ingreso) AS fecha_ingreso, servicio, subgrupo_cama AS unidad, via_ingreso,
+               CASE WHEN nivel_triage IS NULL THEN '—' ELSE 'Triage ' || nivel_triage END AS triage,
+               capitulo_cie10 AS grupo_diagnostico, ROUND(tiempo_espera_min) AS espera_min,
+               ROUND(estancia_horas / 24.0, 1) AS estancia_dias
+          FROM ingresos WHERE fecha_ingreso BETWEEN ? AND ? ORDER BY fecha_ingreso DESC LIMIT 3000""",
+                           ctx.get_conn(), params=(lo, hi))
+    c1, c2 = st.columns(2)
+    services = c1.multiselect("Servicio", sorted(df["servicio"].dropna().unique()), key="list_srv")
+    groups = c2.multiselect("Grupo de diagnóstico", sorted(df["grupo_diagnostico"].dropna().unique()),
+                            key="list_dx")
+    view = df[df["servicio"].isin(services)] if services else df
+    view = view[view["grupo_diagnostico"].isin(groups)] if groups else view
+    view = view.assign(unidad=view["unidad"].map(db.unit_label))
+    st.dataframe(view, hide_index=True, width="stretch", height=380)
+    st.caption(f"{fmt_num(len(view))} ingresos. Sin nombre, documento ni diagnóstico específico: solo el grupo "
+               "CIE-10. El extracto no trae médico asignado.")
+
+
 def _emergency_section(start, end) -> None:
     waits = ctx.cached("kpi_wait_times", start, end)
     bt, heat = waits["por_triage"], waits["por_turno_triage"]
@@ -239,8 +285,8 @@ def _epidemiology_section(start, end) -> None:
 # ===========================================================================
 # B. ASISTENTE IA
 # ===========================================================================
-ENGINE_LABEL = {"llm": "🧠 LLM (NL2SQL)", "reglas": "🛡️ Plan B · SQL validado",
-                "reglas (respaldo)": "🛟 Plan B de respaldo (el LLM falló)", "seguridad": "⛔ Bloqueado",
+ENGINE_LABEL = {"llm": "LLM (NL2SQL)", "reglas": "Plan B · SQL validado",
+                "reglas (respaldo)": "Plan B de respaldo (el LLM falló)", "seguridad": "Bloqueado",
                 "sql directo": "⌨️ SQL escrito por el usuario (validado)"}
 
 
@@ -277,7 +323,7 @@ def _render_response(resp: AgentResponse, idx: int) -> None:
             st.dataframe(resp.data, width="stretch", hide_index=True, height=min(38 * len(resp.data) + 40, 300))
     with st.expander(f"Trazabilidad · {ENGINE_LABEL.get(resp.engine, resp.engine)} · {resp.elapsed_ms} ms",
                      expanded=False):
-        st.markdown(chip("Solo lectura (mode=ro)", "ok", "🔒") + " " + chip("Authorizer SQLite", "ok") + " "
+        st.markdown(chip("Solo lectura (mode=ro)", "ok") + " " + chip("Authorizer SQLite", "ok") + " "
                     + chip("Sin identificadores de pacientes", "ok"), unsafe_allow_html=True)
         if resp.sql:
             st.code(resp.sql, language="sql")
@@ -297,13 +343,13 @@ def page_asistente() -> None:
         label = st.radio("Motor", list(options), index=default, label_visibility="collapsed", key="engine")
         agent.mode = options[label]
         if agent.llm:
-            st.success(f"LLM activo: {agent.llm.name}", icon="🧠")
+            st.success(f"LLM activo: {agent.llm.name}", icon=":material/psychology:")
         else:
-            st.info("Sin LLM configurado: responde el Plan B (SQL validado, sin red).", icon="🛡️")
-    banner("🔒 <b>Consultas de solo lectura</b> sobre la base analítica anonimizada (<code>mode=ro</code> + authorizer "
+            st.info("Sin LLM configurado: responde el Plan B (SQL validado, sin red).", icon=":material/verified_user:")
+    banner("<b>Consultas de solo lectura</b> sobre la base analítica anonimizada (<code>mode=ro</code> + authorizer "
            "SQLite). El asistente no tiene acceso a historias clínicas ni a prescripciones.", "ok")
 
-    labels = ["🛏️ Camas UCI hoy", "💊 Medicamentos < 5 días", "⏱️ Espera urgencias (7 d)", "🏥 Servicio con más ingresos"]
+    labels = ["Camas UCI hoy", "Medicamentos < 5 días", "Espera urgencias (7 d)", "Servicio con más ingresos"]
     cols = st.columns(4)
     for i, q in enumerate(KEY_QUESTIONS):
         if cols[i].button(labels[i], key=f"key_q_{i}", help=q, width="stretch"):
@@ -322,7 +368,7 @@ def page_asistente() -> None:
         for i, (question, resp) in enumerate(history):
             with st.chat_message("user"):
                 st.markdown(question)
-            with st.chat_message("assistant", avatar="🏥"):
+            with st.chat_message("assistant", avatar=str(LOGO_ICON)):
                 _render_response(resp, i)
     if history and st.button("Limpiar conversación"):
         history.clear()
@@ -332,11 +378,13 @@ def page_asistente() -> None:
 # ===========================================================================
 # C. ALERTAS Y ACCIONES
 # ===========================================================================
-SEM_STYLE = {"ROJO": (RED, "danger", "Rojo · < 5 días"), "AMARILLO": (AMBER, "warn", "Amarillo · 5–10 días")}
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+SEM_STYLE = {"ROJO": (RED, "danger", "Urgente"), "AMARILLO": (AMBER, "warn", "Pronto")}
+SEM_LEVEL = {"Urgente": "ROJO", "Pronto": "AMARILLO"}
 
 
 def page_alertas() -> None:
-    tab_sem, tab_ops = st.tabs(["💊 Semáforo farmacéutico", "🧭 Acciones operativas"])
+    tab_sem, tab_ops = st.tabs(["Farmacia: qué pedir", "Acciones operativas"])
     with tab_sem:
         clin = ctx.get_clin()
         rows = [dict(r) for r in ps.stock_semaphore(clin)]
@@ -344,46 +392,55 @@ def page_alertas() -> None:
         n_red = int((df["semaforo"] == "ROJO").sum()) if not df.empty else 0
         n_yellow = int((df["semaforo"] == "AMARILLO").sum()) if not df.empty else 0
         c1, c2, c3 = st.columns([1.3, 1.3, 1], vertical_alignment="bottom")
-        level = c1.segmented_control("Nivel", ["Rojo", "Amarillo", "Ambos"], default="Rojo")
+        level = c1.segmented_control("Qué pedir", ["Urgente", "Pronto", "Ambos"], default="Urgente",
+                                     help="Urgente: se agota en menos de 5 días. Pronto: entre 5 y 10 días.")
         kind = c2.segmented_control("Tipo", ["Medicamento", "Insumo / dispositivo", "Todos"], default="Todos")
         allowed = ctx.can("farmacia.orden_compra")
-        c3.download_button("Orden de compra 15 d (CSV)", ps.purchase_order_csv(clin), "orden_compra_15d.csv",
-                           "text/csv", icon=":material/download:", type="primary", width="stretch",
+        order = reports.purchase_order_xlsx([dict(r) for r in ps.stock_semaphore(clin, ("ROJO",))],
+                                            ctx.ref_date().isoformat(), ctx.current_user()["nombre_mostrado"])
+        c3.download_button("Orden de compra (Excel)", order, f"orden_compra_{ctx.ref_date().isoformat()}.xlsx",
+                           XLSX, icon=":material/download:", type="primary", width="stretch",
                            disabled=not allowed,
                            help=None if allowed else "Exportar la orden requiere el permiso de Administrador")
         query = st.text_input("Buscar ítem", placeholder="Ej.: enoxaparina, catéter, dipirona…")
-        st.markdown(chip(f"{n_red} en rojo", "danger", "●") + " " + chip(f"{n_yellow} en amarillo", "warn", "●") + " "
-                    + chip("Stock simulado · consumo real 30 días", "neutral"), unsafe_allow_html=True)
+        st.markdown(chip(f"{n_red} urgentes · se agotan esta semana", "danger", "●") + " "
+                    + chip(f"{n_yellow} para pedir pronto", "warn", "●") + " "
+                    + chip("Existencias simuladas · consumo real", "neutral"), unsafe_allow_html=True)
         view = df
         if not view.empty:
-            if level in ("Rojo", "Amarillo"):
-                view = view[view["semaforo"] == level.upper()]
+            if level in SEM_LEVEL:
+                view = view[view["semaforo"] == SEM_LEVEL[level]]
             if kind in ("Medicamento", "Insumo / dispositivo"):
                 view = view[view["tipo_item"] == kind]
             if query:
                 view = view[view["nombre"].str.contains(query, case=False, na=False)]
+        if "inventario" in ctx.PAGES:
+            st.page_link(ctx.PAGES["inventario"], label="Registrar llegada de pedidos o ajustes en Inventario",
+                         icon=":material/inventory_2:")
         cards = []
         for r in view.head(12).itertuples():
             color, tone, label = SEM_STYLE[r.semaforo]
-            body = (f"{fmt_num(r.disponible)} disponibles · {fmt_num(r.consumo_diario_promedio, 1)}/día"
-                    f"<br><b>Pedir {fmt_num(r.orden_sugerida_15d)} und.</b> para 15 días")
+            body = (f"Se usan unas {fmt_num(r.consumo_diario_promedio)} al día."
+                    f"<br><b>Recomendado pedir: {fmt_num(r.orden_sugerida_15d)} und.</b>")
             if r.critico_continuidad:
-                body += "<br>🛡️ Continuidad crítica: priorizar reposición"
-            cards.append(card(r.nombre.capitalize()[:70], body, color, chip(label.split(" ·")[0], tone),
-                              big=f"{fmt_num(r.dias_cobertura, 1)} días",
-                              progress=(r.dias_cobertura or 0) / 10))
+                body += "<br><b>Tratamiento que no se puede suspender:</b> priorizar"
+            cards.append(card(r.nombre.capitalize()[:70], body, color, chip(label, tone),
+                              big=f"Quedan {fmt_num(r.disponible)} und."))
         if cards:
             grid(cards)
         else:
             st.info("Ningún ítem coincide con el filtro.")
         if len(view) > 12:
             with st.expander(f"Ver los {len(view)} ítems en tabla"):
-                st.dataframe(view[["nombre", "tipo_item", "semaforo", "dias_cobertura", "disponible", "reservado",
-                                   "consumo_diario_promedio", "orden_sugerida_15d"]], hide_index=True,
-                             width="stretch", height=360)
+                table = view[["nombre", "tipo_item", "semaforo", "disponible", "consumo_diario_promedio",
+                              "orden_sugerida_15d"]].rename(columns={
+                    "nombre": "Ítem", "tipo_item": "Tipo", "semaforo": "Prioridad", "disponible": "Quedan",
+                    "consumo_diario_promedio": "Uso por día", "orden_sugerida_15d": "Recomendado pedir"})
+                table["Prioridad"] = table["Prioridad"].map({"ROJO": "Urgente", "AMARILLO": "Pronto"})
+                st.dataframe(table, hide_index=True, width="stretch", height=360)
 
     with tab_ops:
-        alerts = [a for a in ctx.get_agent().alerts() if a.category != "Farmacia"]
+        alerts = [a for a in ctx.alerts() if a.category != "Farmacia"]
         chosen = st.pills("Severidad", ["Crítica", "Alta", "Media", "Info"], default=["Crítica", "Alta", "Media"],
                           selection_mode="multi")
         chosen = {c.lower() for c in (chosen or [])}
@@ -408,7 +465,7 @@ def page_alertas() -> None:
 # F. DATOS Y MÉTODO
 # ===========================================================================
 def page_datos() -> None:
-    tab_load, tab_audit = st.tabs(["🗄️ Carga de extractos", "🧾 Bitácora de auditoría"])
+    tab_load, tab_audit = st.tabs(["Carga de extractos", "Bitácora de auditoría"])
     with tab_load:
         info = ctx.meta()
         counts = {t: ctx.get_conn().execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
@@ -453,7 +510,7 @@ def page_datos() -> None:
         if rows.empty:
             st.info("Aún no hay accesos registrados. Entra como Dra. Ruiz y abre una historia clínica.")
         else:
-            denied = rows["accion"].str.startswith("DENEGADO")
+            denied = rows["accion"].str.match(r"DENEGADO|LOGIN_FALLIDO|LOGIN_BLOQUEADO")
             emerg = rows["acceso_emergencia"] == 1
             st.markdown(" ".join([chip(f"{len(rows)} eventos", "neutral"),
                                   chip(f"{int((~denied).sum())} permitidos", "ok"),
@@ -461,12 +518,20 @@ def page_datos() -> None:
                                   chip(f"{int(emerg.sum())} accesos de emergencia", "warn")]), unsafe_allow_html=True)
             only = st.segmented_control("Filtro", ["Todos", "Denegados", "Emergencia"], default="Todos")
             view = rows[denied] if only == "Denegados" else rows[emerg] if only == "Emergencia" else rows
-            st.dataframe(view.rename(columns={"id_paciente": "paciente", "acceso_emergencia": "emergencia"})
-                         .fillna("—"), hide_index=True, width="stretch", height=380,
-                         column_config={"fecha": "Fecha", "usuario": "Usuario", "rol": "Rol", "accion": "Acción",
-                                        "recurso": "Motivo de la decisión", "paciente": "Paciente",
-                                        "emergencia": st.column_config.CheckboxColumn("Emergencia"),
-                                        "justificacion": "Justificación"})
+            if view.empty:
+                st.info({"Denegados": "Todavía no hay accesos denegados: nadie ha intentado algo que su rol no permite. "
+                                      "Pruébalo: entra como Enfermería y pregúntale a la IA qué servicio tiene más "
+                                      "pacientes, o intenta ingresar con una contraseña equivocada.",
+                         "Emergencia": "Todavía nadie ha usado el acceso de emergencia. Pruébalo: pon el reloj en "
+                                       "turno de noche, entra como Dra. Ruiz, abre una historia clínica y usa "
+                                       "“Romper el vidrio” con una justificación."}.get(only, "Sin eventos."))
+            else:
+                st.dataframe(view.rename(columns={"id_paciente": "paciente", "acceso_emergencia": "emergencia"})
+                             .fillna("—"), hide_index=True, width="stretch", height=380,
+                             column_config={"fecha": "Fecha", "usuario": "Usuario", "rol": "Rol", "accion": "Acción",
+                                            "recurso": "Motivo de la decisión", "paciente": "Paciente",
+                                            "emergencia": st.column_config.CheckboxColumn("Emergencia"),
+                                            "justificacion": "Justificación"})
         with st.expander("Usuarios, estados de cuenta y turnos"):
             users = pd.read_sql_query("""
                 SELECT u.nombre_mostrado AS usuario, r.nombre AS rol, u.estado_cuenta, u.registro_profesional,

@@ -333,3 +333,56 @@ def audit_log(conn: sqlite3.Connection, limit: int = 500) -> list[sqlite3.Row]:
                a.id_paciente, a.acceso_emergencia, a.justificacion
           FROM auditoria_accesos a LEFT JOIN usuarios u ON u.id = a.usuario_id
           LEFT JOIN roles r ON r.id = u.rol_id ORDER BY a.id DESC LIMIT ?""", (limit,)).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Gestión de inventario (permiso inventario.auditar). El stock nunca se edita: se registran movimientos.
+# ---------------------------------------------------------------------------
+def inventory(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Existencias actuales por ítem con su semáforo y el pedido recomendado a 15 días."""
+    return conn.execute("""
+        SELECT s.codigo, s.nombre, s.tipo_item, s.disponible, s.reservado, s.consumo_diario_promedio,
+               s.dias_cobertura, s.semaforo, s.orden_sugerida_15d, f.critico_continuidad
+          FROM v_semaforo_stock s JOIN productos_farmacia f ON f.codigo = s.codigo
+         ORDER BY CASE s.semaforo WHEN 'ROJO' THEN 0 WHEN 'AMARILLO' THEN 1 WHEN 'VERDE' THEN 2 ELSE 3 END,
+                  s.consumo_diario_promedio DESC""").fetchall()
+
+
+def receive_stock(conn: sqlite3.Connection, codigo: str, cantidad: int, usuario_id: int, nota: str = "",
+                  now: datetime | str | None = None) -> None:
+    """Llegada de un pedido: suma unidades disponibles (ENTRADA_COMPRA)."""
+    if cantidad <= 0:
+        raise sqlite3.IntegrityError("La cantidad recibida debe ser mayor que cero")
+    with conn:
+        conn.execute("INSERT INTO inventario_movimientos(codigo_producto, tipo, delta_disponible, delta_reservado, "
+                     "usuario_id, nota, fecha) VALUES (?, 'ENTRADA_COMPRA', ?, 0, ?, ?, ?)",
+                     (codigo, int(cantidad), usuario_id, nota or "Llegada de pedido", _now(now)))
+
+
+def adjust_stock(conn: sqlite3.Connection, codigo: str, conteo_fisico: int, usuario_id: int, motivo: str,
+                 now: datetime | str | None = None) -> int:
+    """Conteo físico: registra un AJUSTE por la diferencia con lo que dice el sistema. Devuelve la diferencia."""
+    if conteo_fisico < 0:
+        raise sqlite3.IntegrityError("El conteo físico no puede ser negativo")
+    if len((motivo or "").strip()) < 5:
+        raise sqlite3.IntegrityError("Escribe el motivo del ajuste")
+    current = conn.execute("SELECT disponible FROM v_stock WHERE codigo = ?", (codigo,)).fetchone()
+    if current is None:
+        raise sqlite3.IntegrityError("Producto inexistente")
+    delta = int(conteo_fisico) - int(current["disponible"])
+    if delta:
+        with conn:
+            conn.execute("INSERT INTO inventario_movimientos(codigo_producto, tipo, delta_disponible, delta_reservado, "
+                         "usuario_id, nota, fecha) VALUES (?, 'AJUSTE', ?, 0, ?, ?, ?)",
+                         (codigo, delta, usuario_id, motivo.strip(), _now(now)))
+    return delta
+
+
+def movements(conn: sqlite3.Connection, codigo: str | None = None, limit: int = 200) -> list[sqlite3.Row]:
+    where, params = ("WHERE m.codigo_producto = ?", (codigo, limit)) if codigo else ("", (limit,))
+    return conn.execute(f"""
+        SELECT m.fecha, f.nombre AS producto, m.tipo, m.delta_disponible, m.delta_reservado,
+               COALESCE(u.nombre_mostrado, 'Sistema') AS usuario, m.nota
+          FROM inventario_movimientos m JOIN productos_farmacia f ON f.codigo = m.codigo_producto
+          LEFT JOIN usuarios u ON u.id = m.usuario_id {where}
+         ORDER BY m.id DESC LIMIT ?""", params).fetchall()

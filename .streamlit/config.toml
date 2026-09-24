@@ -1,13 +1,17 @@
 [theme]
 base = "light"
-primaryColor = "#2E7D32"
+primaryColor = "#507643"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F2F6F3"
-textColor = "#1C2B22"
+textColor = "#1F2433"
 font = "sans serif"
 
 [server]
 headless = true
+# Sin vigilar archivos: en Windows, con el .venv dentro del proyecto, el vigilante recorre miles de archivos
+# y vuelve lenta la app. Para desarrollo con recarga automática: streamlit run app.py --server.fileWatcherType auto
+fileWatcherType = "none"
+runOnSave = false
 maxUploadSize = 400
 
 [browser]

@@ -19,7 +19,7 @@ import database as db
 
 FMT = "%Y-%m-%d %H:%M:%S"
 ORDER = {"crítica": 0, "alta": 1, "media": 2, "info": 3}
-ICON = {"crítica": "🔴", "alta": "🟠", "media": "🟡", "info": "🔵"}
+DOT = {"crítica": "#DC2626", "alta": "#EA580C", "media": "#CA8A04", "info": "#2E3378"}
 
 
 @dataclass
@@ -43,14 +43,32 @@ def _dt(ts: str) -> datetime:
 # ---------------------------------------------------------------------------
 # Fuentes por rol
 # ---------------------------------------------------------------------------
-def _hospital(alerts, categories: set[str], slug_for: dict[str, str]) -> list[Notification]:
-    """Alertas críticas y altas del motor de recomendaciones (mismo texto que en Alertas y acciones)."""
+def _pharmacy_live(clin: sqlite3.Connection) -> Notification | None:
+    """Farmacia en vivo desde el libro de inventario de clinico.db: cambia al recibir pedidos o entregar fórmulas."""
+    red = clin.execute("SELECT COUNT(*) FROM v_semaforo_stock WHERE semaforo = 'ROJO'").fetchone()[0]
+    if not red:
+        return None
+    return Notification(f"farmacia:{red}", "crítica", _n(red, "ítem se agota en menos de 5 días",
+                                                           "ítems se agotan en menos de 5 días"),
+                        "Revisar la orden de compra sugerida y registrar la llegada de los pedidos.", "alertas",
+                        "Ver qué pedir")
+
+
+def _hospital(alerts, categories: set[str], slug_for: dict[str, str], clin=None) -> list[Notification]:
+    """Alertas críticas y altas del motor de recomendaciones (mismo texto que en Alertas y acciones).
+    Farmacia se toma del inventario vivo (clinico.db) para que refleje pedidos y entregas."""
     out = []
     for a in alerts:
         if a.severity in ("crítica", "alta") and a.category in categories:
+            if a.category == "Farmacia" and clin is not None:
+                continue
             out.append(Notification(f"alerta:{a.category}:{a.title}", a.severity, a.title, a.action,
                                     slug_for.get(a.category, "alertas"),
                                     "Ver camas" if a.category == "Ocupación" else "Ver acción"))
+    if "Farmacia" in categories and clin is not None:
+        live = _pharmacy_live(clin)
+        if live:
+            out.insert(0, live)
     return out
 
 
@@ -168,12 +186,12 @@ def collect(role: str, user: dict, clin: sqlite3.Connection, analytics: sqlite3.
     """Notificaciones del usuario, ordenadas por severidad. Cada rol ve solo lo que puede atender."""
     to_beds = {"Ocupación": "camas", "Farmacia": "alertas"}
     if role == "ADMIN":
-        items = (_hospital(alerts, {"Ocupación", "Farmacia", "Urgencias", "Demanda", "Cirugías"}, to_beds)
+        items = (_hospital(alerts, {"Ocupación", "Farmacia", "Urgencias", "Demanda", "Cirugías"}, to_beds, clin)
                  + _triage(analytics, now) + _admin_audit(clin))
     elif role == "DOCTOR":
         items = _doctor(clin, user["id"]) + _triage(analytics, now) + _hospital(alerts, {"Ocupación"}, to_beds)
     elif role == "ENFERMERIA":
-        items = _nurse(clin, now) + _triage(analytics, now) + _hospital(alerts, {"Ocupación", "Farmacia"}, to_beds)
+        items = _nurse(clin, now) + _triage(analytics, now) + _hospital(alerts, {"Ocupación", "Farmacia"}, to_beds, clin)
     elif role == "PACIENTE":
         items = _patient(clin, user["id_paciente"], now)
     else:
@@ -192,16 +210,16 @@ def render_bell(container) -> None:
     from ui.theme import esc
 
     user = ctx.current_user()
-    alerts = ctx.get_agent().alerts() if user["rol"] != "PACIENTE" else []
+    alerts = ctx.alerts() if user["rol"] != "PACIENTE" else []
     items = collect(user["rol"], user, ctx.get_clin(), ctx.get_conn(), ctx.clock(), alerts)
     read = st.session_state.setdefault("notif_read", {}).setdefault(user["id"], set())
     unread = [n for n in items if n.id not in read]
     toasted = st.session_state.setdefault("notif_toasted", set())
     for n in [n for n in unread if n.severity == "crítica" and (user["id"], n.id) not in toasted][:2]:
-        st.toast(n.title, icon="🚨")
+        st.toast(n.title, icon=":material/warning:")
         toasted.add((user["id"], n.id))
 
-    label = f"🔔 {len(unread)}" if unread else "🔔"
+    label = f":material/notifications: {len(unread)}" if unread else ":material/notifications:"
     with container.popover(label, width="stretch", help="Notificaciones"):
         head, action = st.columns([1.6, 1], vertical_alignment="center")
         head.markdown(f"**Notificaciones** · {len(unread)} sin leer")
@@ -213,7 +231,7 @@ def render_bell(container) -> None:
         for i, n in enumerate(items[:12]):
             faded = "opacity:.55;" if n.id in read else ""
             st.markdown(f'<div style="{faded}border-top:1px solid #E5E7EB;padding:0.45rem 0 0.2rem;">'
-                        f'{ICON.get(n.severity, "•")} <b>{esc(n.title)}</b><br>'
+                        f'<span style="color:{DOT.get(n.severity, "#9CA3AF")}">●</span> <b>{esc(n.title)}</b><br>'
                         f'<span class="muted">{esc(n.detail)}</span></div>', unsafe_allow_html=True)
             if n.slug and n.slug in ctx.PAGES:
                 st.page_link(ctx.PAGES[n.slug], label=f"{n.link_label} →")

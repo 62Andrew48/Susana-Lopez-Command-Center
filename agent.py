@@ -75,8 +75,10 @@ CREATE TABLE inventario_farmacia (codigo TEXT, nombre TEXT, tipo_item TEXT, cons
   dias_inventario REAL /*stock_actual / consumo_diario_promedio*/);
 
 -- Censo diario de camas por subgrupo (fecha TEXT 'YYYY-MM-DD'). USAR ESTA TABLA PARA OCUPACIÓN.
+-- capacidad, camas_ocupadas y porcentaje_ocupacion son de camas FÍSICAS; las virtuales (expansión) van aparte.
 CREATE TABLE ocupacion_diaria (fecha TEXT, servicio TEXT, grupo_cama TEXT, subgrupo_cama TEXT, capacidad INTEGER,
-  camas_virtuales INTEGER, camas_ocupadas INTEGER, pacientes INTEGER, porcentaje_ocupacion REAL);
+  camas_virtuales INTEGER, camas_ocupadas INTEGER, camas_expansion_ocupadas INTEGER, pacientes INTEGER,
+  porcentaje_ocupacion REAL /*NULL si el subgrupo no tiene camas físicas*/);
 CREATE TABLE camas (codigo_cama TEXT, nombre_cama TEXT, grupo_cama TEXT, subgrupo_cama TEXT, servicio TEXT, es_virtual INTEGER);
 
 -- Cirugías: una fila por programación
@@ -395,13 +397,13 @@ class RecommendationEngine:
             donors = physical[(physical["pool"] == r["pool"]) & (physical["subgrupo_cama"] != r["subgrupo_cama"])
                               & (physical["porcentaje_ocupacion"] < config.OCCUPANCY_LOW_PCT)
                               ].sort_values("porcentaje_ocupacion").head(2)
-            donor_txt = (", ".join(f"{d.subgrupo_cama.title()} ({fmt_num(d.porcentaje_ocupacion, 1)} %)"
+            donor_txt = (", ".join(f"{db.unit_label(d.subgrupo_cama)} ({fmt_num(d.porcentaje_ocupacion, 1)} %)"
                                    for d in donors.itertuples())
                          if not donors.empty else "el grupo de enfermería flotante (no hay unidades "
                                                   f"de población {r['pool']} con holgura)")
             alerts.append(Alert(
                 severity="crítica" if critical else "alta", category="Ocupación",
-                title=f"{r['subgrupo_cama'].title()} al {fmt_num(pct, 1)} % de ocupación",
+                title=f"{db.unit_label(r['subgrupo_cama'])} al {fmt_num(pct, 1)} % de ocupación",
                 detail=f"{int(r['camas_ocupadas'])} de {int(r['capacidad'])} camas ocupadas; quedan {free} libres. "
                        f"Para volver al {fmt_num(config.OCCUPANCY_WARNING_PCT)} % se necesitan "
                        f"{beds_to_open} camas adicionales o egresos.",
@@ -626,7 +628,7 @@ REGLAS:
 - La fecha de referencia ("hoy") es {r:%Y-%m-%d}. Los datos son históricos: NUNCA uses date('now').
 - "Última semana" = '{r - timedelta(days=6):%Y-%m-%d}' a '{r:%Y-%m-%d}'. "Este mes" = '{r:%Y-%m}-01' a '{r:%Y-%m-%d}'.
 - Fechas en ingresos/servicios/medicamentos son TEXT 'YYYY-MM-DD HH:MM:SS'; usa date(col) o BETWEEN con '23:59:59'.
-- Ocupación de camas: usa ocupacion_diaria (fecha exacta) y excluye Urgencias de la ocupación global.
+- Ocupación de camas: usa ocupacion_diaria (fecha exacta), filtra capacidad > 0 y excluye Urgencias de la ocupación global.
 - Tiempos de espera: AVG(tiempo_espera_min) con espera_valida = 1.
 - Nunca selecciones id_paciente, oid_ingreso ni datos personales; responde con agregados.
 - Solo SELECT o WITH. Una sola sentencia. Máximo 50 filas salvo que pidan series por día.
@@ -638,7 +640,7 @@ EJEMPLOS:
 P: ¿Cuántas camas de UCI están ocupadas hoy?
 ```sql
 SELECT subgrupo_cama, camas_ocupadas, capacidad, porcentaje_ocupacion FROM ocupacion_diaria
-WHERE fecha = '{r:%Y-%m-%d}' AND servicio = 'UCI' ORDER BY camas_ocupadas DESC
+WHERE fecha = '{r:%Y-%m-%d}' AND servicio = 'UCI' AND capacidad > 0 ORDER BY camas_ocupadas DESC
 ```
 P: ¿Cuáles son los medicamentos con menos de 5 días de inventario?
 ```sql
@@ -759,7 +761,7 @@ GROUP BY especialidad ORDER BY servicios DESC LIMIT 10
         if start == end:
             sql, df = self._query(f"""
 SELECT servicio, subgrupo_cama, camas_ocupadas, capacidad, porcentaje_ocupacion
-FROM ocupacion_diaria WHERE fecha = '{end:%Y-%m-%d}' {where}
+FROM ocupacion_diaria WHERE fecha = '{end:%Y-%m-%d}' AND capacidad > 0 {where}
 ORDER BY porcentaje_ocupacion DESC""")
             occ, cap = df["camas_ocupadas"].sum(), df["capacidad"].sum()
             pct = occ / cap * 100 if cap else 0
@@ -768,13 +770,13 @@ ORDER BY porcentaje_ocupacion DESC""")
                       f"{fmt_num(cap)} disponibles ({fmt_num(pct, 1)} % de ocupación).**")
             if len(df) > 1:
                 top = df.iloc[0]
-                answer += f" La unidad más cargada es {top.subgrupo_cama.title()} con {fmt_num(top.porcentaje_ocupacion, 1)} %."
+                answer += f" La unidad más cargada es {db.unit_label(top.subgrupo_cama)} con {fmt_num(top.porcentaje_ocupacion, 1)} %."
             chart = {"type": "bar", "x": "subgrupo_cama", "y": "porcentaje_ocupacion"}
         else:
             sql, df = self._query(f"""
 SELECT fecha, servicio, SUM(camas_ocupadas) AS camas_ocupadas, SUM(capacidad) AS capacidad,
        ROUND(100.0 * SUM(camas_ocupadas) / SUM(capacidad), 1) AS porcentaje_ocupacion
-FROM ocupacion_diaria WHERE fecha BETWEEN '{start:%Y-%m-%d}' AND '{end:%Y-%m-%d}' {where}
+FROM ocupacion_diaria WHERE fecha BETWEEN '{start:%Y-%m-%d}' AND '{end:%Y-%m-%d}' AND capacidad > 0 {where}
 GROUP BY fecha, servicio ORDER BY fecha""")
             answer = (f"Ocupación promedio {('de ' + service) if service else 'por servicio'} en el periodo "
                       f"{label}: {fmt_num(df['porcentaje_ocupacion'].mean(), 1)} %.")

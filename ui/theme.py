@@ -14,7 +14,9 @@ import streamlit as st
 
 import config
 
-EMERALD, BLUE, BLUE_LIGHT = "#059669", "#1F4E79", "#6B93BD"
+# Identidad del hospital (tomada del logo): azul institucional y los dos verdes de la flor
+NAVY, BRAND_GREEN, BRAND_LIME = "#2E3378", "#507643", "#8AB94F"
+EMERALD, BLUE, BLUE_LIGHT = "#059669", NAVY, "#6F74B8"
 AMBER, RED, GREY = "#D97706", "#DC2626", "#9CA3AF"
 TEXT, MUTED, BORDER, PAGE_BG = "#111827", "#6B7280", "#E5E7EB", "#F8F9FA"
 FONT_STACK = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
@@ -40,7 +42,10 @@ CSS = f"""
   /* Interfaz nativa oculta (se conserva la navegación superior y el botón de la barra lateral) */
   [data-testid="stToolbarActions"], [data-testid="stMainMenu"], [data-testid="stAppDeployButton"],
   [data-testid="stStatusWidget"], [data-testid="stDecoration"], #MainMenu, footer {{display: none !important;}}
-  header[data-testid="stHeader"] {{background: #FFFFFF; border-bottom: 1px solid {BORDER};}}
+  header[data-testid="stHeader"] {{background: #FFFFFF; border-bottom: 3px solid {BRAND_LIME};}}
+  [data-testid="stSidebarNav"] a[aria-current="page"] {{background: #EEF5E6;}}
+  [data-testid="stSidebarNav"] a[aria-current="page"] span {{color: {BRAND_GREEN}; font-weight: 700;}}
+  .brand {{display:flex; align-items:center; gap:0.7rem;}}
 
   html, body, .stApp, [data-testid="stSidebar"], button, input, textarea {{font-family: {FONT_STACK};}}
   .stApp, [data-testid="stAppViewContainer"] {{background: {PAGE_BG};}}

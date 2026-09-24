@@ -125,6 +125,13 @@ def _patient_answer(question: str, clin: sqlite3.Connection, id_paciente: int, n
 # ---------------------------------------------------------------------------
 # Punto de entrada
 # ---------------------------------------------------------------------------
+def _kpis_or_none(code: str) -> dict | None:
+    try:
+        return ml.kpis(code)
+    except ml.ServiceUnavailable:
+        return None
+
+
 def _forecast(question: str, agent) -> AgentResponse | None:
     """Pronósticos -> microservicio del dominio. Si el servicio no responde, cae al agente y lo avisa."""
     import ml_services as ml
@@ -132,7 +139,7 @@ def _forecast(question: str, agent) -> AgentResponse | None:
     if service is None:
         return None
     try:
-        return AgentResponse(question, ml.describe(service, ml.predict(service.code)), engine="modelo predictivo")
+        return AgentResponse(question, ml.describe(service, ml.predict(service.code), _kpis_or_none(service.code)), engine="modelo predictivo")
     except ml.ServiceUnavailable as exc:
         resp = agent.ask(question)
         resp.answer = (f"_El pronóstico de {service.name} no está disponible en este momento; "

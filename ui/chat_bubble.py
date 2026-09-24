@@ -19,15 +19,17 @@ import unicodedata
 
 import streamlit as st
 
+import auth
 import database as db
 from agent import AgentResponse
 from ui import context as ctx
+from ui.session import LOGO_ICON
 from ui import assistant_scope as scope_mod
 from ui.theme import BLUE, BORDER, MUTED, TEXT, esc, severity_pill
 
 PANEL_H = 430            # alto del hilo de mensajes (px)
-SHORT = ["🛏️ Camas UCI hoy", "💊 Medicamentos < 5 días", "⏱️ Espera urgencias", "🏥 Servicio con más ingresos",
-         "🗺️ ¿Dónde hay camas libres para adultos?"]
+SHORT = ["Camas UCI hoy", "Medicamentos < 5 días", "Espera urgencias", "Servicio con más ingresos",
+         "¿Dónde hay camas libres para adultos?"]
 
 CSS = f"""
 <style>
@@ -112,16 +114,19 @@ def ask(question: str) -> AgentResponse:
                             id_paciente=user.get("id_paciente"), now=ctx.clock(),
                             forecasts=ctx.can("tablero.gerencial.ver"))
     resp.elapsed_ms = resp.elapsed_ms or int((time.time() - t0) * 1000)
+    if resp.engine in ("fuera de alcance", "seguridad"):  # queda en la bitácora de auditoría
+        permission = "agente.consultar" if resp.engine == "fuera de alcance" else "consulta.solo_lectura"
+        auth.log_denied(ctx.get_clin(), user["id"], permission, f"Asistente: {question}", ctx.clock())
     return resp
 
 
 # ---------------------------------------------------------------------------
 # Render compacto de una respuesta
 # ---------------------------------------------------------------------------
-ENGINE_SHORT = {"llm": "🧠 IA", "reglas": "✓ Respuesta verificada", "reglas (respaldo)": "✓ Respuesta verificada",
-                "seguridad": "⛔ Bloqueado", "sql directo": "⌨️ Consulta validada", "mapa de camas": "🛏️ Mapa de camas",
-                "glosario": "📖 Glosario", "mis datos": "🔒 Solo tus datos", "fuera de alcance": "🔒 Acceso limitado",
-                "modelo predictivo": "📈 Modelo predictivo"}
+ENGINE_SHORT = {"llm": "IA", "reglas": "Respuesta verificada", "reglas (respaldo)": "Respuesta verificada",
+                "seguridad": "Bloqueado", "sql directo": "Consulta validada", "mapa de camas": "Mapa de camas",
+                "glosario": "Glosario", "mis datos": "Solo tus datos", "fuera de alcance": "Acceso limitado",
+                "modelo predictivo": "Modelo predictivo"}
 
 
 def _render(resp: AgentResponse, idx: int) -> None:
@@ -159,16 +164,16 @@ def _bubble() -> None:
         with st.container(key="ia_panel"):
             head, close = st.columns([5, 1], vertical_alignment="center")
             scope = _scope()
-            head.markdown('<div class="ia-head"><div class="ia-logo">IA</div><div><b>Asistente HSLV</b>'
+            head.markdown('<div class="ia-head"><div><b>Asistente HSLV</b>'
                           f'<small>{esc(scope.subtitle)}</small></div></div>', unsafe_allow_html=True)
-            if close.button("✕", key="ia_close", help="Cerrar"):
+            if close.button("", icon=":material/close:", key="ia_close", help="Cerrar"):
                 st.session_state.ia_open = False
                 st.rerun(scope="fragment")
             history = _history()
             thread = st.container(height=PANEL_H, border=False)
             with thread:
                 if not history:
-                    st.markdown(f'<div class="ia-bot" style="background:#F1F5F9;color:{TEXT}">Hola 👋 Soy el asistente '
+                    st.markdown(f'<div class="ia-bot" style="background:#F1F5F9;color:{TEXT}">Hola, soy el asistente '
                                 'del HSLV. Puedes preguntarme, por ejemplo:</div>', unsafe_allow_html=True)
                     for i, q in enumerate(scope.suggestions):
                         label = SHORT[i] if scope.code == "completo" and i < len(SHORT) else q
@@ -176,7 +181,7 @@ def _bubble() -> None:
                             st.session_state.ia_pending = q
                 for i, (question, resp) in enumerate(history):
                     st.markdown(f'<div class="ia-me">{esc(question)}</div>', unsafe_allow_html=True)
-                    with st.chat_message("assistant", avatar="🏥"):
+                    with st.chat_message("assistant", avatar=str(LOGO_ICON)):
                         _render(resp, i)
             prompt = st.chat_input("Escribe tu pregunta…", key="ia_input")
             prompt = prompt or st.session_state.pop("ia_pending", None)
@@ -189,12 +194,13 @@ def _bubble() -> None:
             if history:
                 c1, c2 = st.columns(2)
                 if "asistente" in ctx.PAGES:
-                    c1.page_link(ctx.PAGES["asistente"], label="Pantalla completa", icon="↗️")
+                    c1.page_link(ctx.PAGES["asistente"], label="Pantalla completa", icon=":material/open_in_full:")
                 if c2.button("Limpiar conversación", key="ia_clear", width="stretch"):
                     history.clear()
                     st.rerun(scope="fragment")
     with st.container(key="ia_fab"):
-        if st.button("✕  Cerrar" if is_open else "✨  Pregúntale a la IA", key="ia_toggle"):
+        if st.button("Cerrar" if is_open else "Pregúntale a la IA", key="ia_toggle",
+                     icon=":material/close:" if is_open else ":material/auto_awesome:"):
             st.session_state.ia_open = not is_open
             st.rerun(scope="fragment")
 

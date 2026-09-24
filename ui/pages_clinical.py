@@ -38,10 +38,10 @@ def _fmt_ts(ts: str) -> str:
 def _countdown(limit: str) -> str:
     h = _hours_left(limit)
     if h < 0:
-        return chip("Vencida · pendiente del job", "danger", "⏰")
+        return chip("Vencida · pendiente del job", "danger")
     if h < 24:
-        return chip(f"Vence en {h:.0f} h", "warn", "⏰")
-    return chip(f"Vence en {h / 24:.1f} días", "info", "⏰")
+        return chip(f"Vence en {h:.0f} h", "warn")
+    return chip(f"Vence en {h / 24:.1f} días", "info")
 
 
 def _patient_selector(key: str) -> int | None:
@@ -59,23 +59,23 @@ def _gate(permission: str, id_paciente: int, key: str):
     decision = ctx.authorize_once(permission, id_paciente, ctx.emergency_for(id_paciente))
     if decision.allowed:
         if decision.emergency:
-            banner(f"🚨 <b>Acceso de emergencia activo</b> para el paciente {id_paciente}. "
+            banner(f"<b>Acceso de emergencia activo</b> para el paciente {id_paciente}. "
                    f"Justificación: “{esc(ctx.emergency_for(id_paciente))}”. Quedó registrado en la bitácora.", "danger")
         return decision
     if "turno" in decision.reason.lower():
-        banner(f"🔒 <b>Estás fuera de turno.</b> Para abrir los datos del paciente {id_paciente} debes activar el "
+        banner(f"<b>Estás fuera de turno.</b> Para abrir los datos del paciente {id_paciente} debes activar el "
                "acceso de emergencia (“romper el vidrio”). La justificación quedará auditada.", "warn")
         with st.form(f"breakglass_{key}"):
             text = st.text_area("Justificación clínica", placeholder="Ej.: paciente en paro cardiorrespiratorio "
                                 "en urgencias, requiero antecedentes y medicación actual.")
-            if st.form_submit_button("🔓 Romper el vidrio y continuar", type="primary"):
+            if st.form_submit_button("Romper el vidrio y continuar", type="primary", icon=":material/lock_open:"):
                 if len(text.strip()) < 20:
                     st.error("Escribe una justificación de al menos 20 caracteres.")
                 else:
                     ctx.set_emergency(id_paciente, text.strip())
                     st.rerun()
     else:
-        banner(f"⛔ Acceso denegado: {esc(decision.reason)}.", "danger")
+        banner(f"Acceso denegado: {esc(decision.reason)}.", "danger")
     return decision
 
 
@@ -85,10 +85,10 @@ def _gate(permission: str, id_paciente: int, key: str):
 def page_clinico() -> None:
     tabs, views = [], []
     if ctx.can("hc.ver_notas") or ctx.can("hc.ver_completa"):
-        tabs.append("📋 Historias clínicas"); views.append(_history_tab)
+        tabs.append("Historias clínicas"); views.append(_history_tab)
     if ctx.can("prescripcion.crear"):
-        tabs.append("✍️ Prescripción"); views.append(_prescription_tab)
-    tabs.append("📦 Dispensación y retorno a stock"); views.append(_dispensing_tab)
+        tabs.append("Prescripción"); views.append(_prescription_tab)
+    tabs.append("Dispensación y retorno a stock"); views.append(_dispensing_tab)
     for tab, view in zip(st.tabs(tabs), views):
         with tab:
             view()
@@ -157,13 +157,13 @@ def _prescription_tab() -> None:
                   chip(f"{fmt_num(info.get('disponible', 0))} disponibles", "neutral"),
                   chip(f"{fmt_num(info.get('dias_cobertura'), 1)} días de cobertura", "neutral")]
         if info.get("critico_continuidad"):
-            badges.append(chip("Continuidad crítica", "info", "🛡️"))
+            badges.append(chip("Continuidad crítica", "info"))
         st.markdown(" ".join(badges), unsafe_allow_html=True)
         if info["bloqueado_reevaluacion"] and not info.get("critico_continuidad"):
-            banner("⛔ <b>Bloqueado:</b> el paciente tiene una fórmula caducada de este medicamento. Requiere una cita "
+            banner("<b>Bloqueado:</b> el paciente tiene una fórmula caducada de este medicamento. Requiere una cita "
                    "de reevaluación cumplida (ver abajo).", "danger")
         elif info["bloqueado_reevaluacion"]:
-            banner("🛡️ Fórmula previa caducada, pero es un medicamento de <b>continuidad crítica</b>: se permite "
+            banner("Fórmula previa caducada, pero es un medicamento de <b>continuidad crítica</b>: se permite "
                    "formular para no interrumpir el tratamiento. La alerta de búsqueda activa ya está en la HC.", "info")
 
         c1, c2, c3 = st.columns(3)
@@ -182,7 +182,7 @@ def _prescription_tab() -> None:
                                    dosis_prescritas=int(units), ambito=scope, horas_ventana=int(window), now=ctx.clock())
                 st.success(f"Fórmula #{pid} creada. " + ("Se reservaron las unidades y el plazo de reclamo empezó a "
                            "correr." if scope == "AMBULATORIA" else "Queda en la cola de dispensación hospitalaria."))
-                st.toast("Fórmula registrada en la historia clínica", icon="✍️")
+                st.toast("Fórmula registrada en la historia clínica", icon=":material/edit_note:")
             except sqlite3.IntegrityError as exc:
                 st.error(f"No se pudo formular: {exc}")
 
@@ -197,7 +197,7 @@ def _prescription_tab() -> None:
                       f"**{esc((c['producto_origen'] or '').capitalize())}**")
         if col2.button("Atender cita", key=f"attend_{c['id']}", width="stretch"):
             ps.complete_appointment(clin, c["id"], ctx.user_id(), ctx.clock())
-            st.toast("Cita cumplida: bloqueo levantado", icon="✅")
+            st.toast("Cita cumplida: bloqueo levantado", icon=":material/check_circle:")
             st.rerun()
 
 
@@ -209,11 +209,11 @@ def _dispensing_tab() -> None:
 
     # --- Simulación para el pitch ---
     left, right = st.columns([2, 1], vertical_alignment="center")
-    left.markdown(" ".join([chip(f"Reloj clínico: {_fmt_ts(ctx.clock())}", "info", "🕒"),
+    left.markdown(" ".join([chip(f"Reloj clínico: {_fmt_ts(ctx.clock())}", "info"),
                             chip(f"{len(queue)} fórmulas en cola", "neutral"),
                             chip(f"{fmt_num(reserved)} dosis reservadas", "neutral"),
                             chip(f"{soon} vencen en < 24 h", "warn" if soon else "ok")]), unsafe_allow_html=True)
-    if right.button("⏩ Simular avance de 72 horas", type="primary", width="stretch",
+    if right.button("Simular avance de 72 horas", icon=":material/fast_forward:", type="primary", width="stretch",
                     help="Adelanta el reloj clínico y ejecuta expire_prescriptions()"):
         before_clock = ctx.clock()
         codes = list({r["codigo_producto"] for r in queue})
@@ -239,7 +239,7 @@ def _dispensing_tab() -> None:
                         f"Reservado: {fmt_num(b.get('reservado'))} → {fmt_num(a.get('reservado'))}<br>"
                         "<i>HC: “Fórmula caducada - Medicamentos no reclamados en el periodo permitido”</i>")
                 if d["critico_continuidad"]:
-                    body += "<br>🛡️ Continuidad crítica: alerta de búsqueda activa, sin bloqueo de nueva fórmula."
+                    body += "<br><b>Continuidad crítica:</b> alerta de búsqueda activa, sin bloqueo de nueva fórmula."
                 cards.append(card(d["producto"].capitalize()[:60], body, RED, chip("Caducada", "danger"),
                                   big=f"+{d['devueltas']} dosis a stock"))
             if cards:
@@ -262,7 +262,7 @@ def _dispensing_tab() -> None:
             if r["ambito"] == "AMBULATORIA":
                 tags.append(_countdown(r["fecha_limite_reclamo"]))
             if r["critico_continuidad"]:
-                tags.append(chip("Continuidad crítica", "info", "🛡️"))
+                tags.append(chip("Continuidad crítica", "info"))
             info_col.markdown(
                 f"**{esc(r['producto'].capitalize())}** · paciente {r['id_paciente']}<br>"
                 f"<span class='muted'>{esc(r['dosis'])} · {r['dosis_entregadas']}/{r['dosis_prescritas']} entregadas · "
@@ -277,7 +277,7 @@ def _dispensing_tab() -> None:
                 else:
                     try:
                         ps.dispense(clin, r["id"], ctx.user_id(), int(qty), ctx.clock())
-                        st.toast(f"Entregadas {qty} dosis", icon="📦")
+                        st.toast(f"Entregadas {qty} dosis", icon=":material/inventory_2:")
                         st.rerun()
                     except sqlite3.IntegrityError as exc:
                         st.error(f"No se pudo entregar: {exc}")
@@ -291,13 +291,13 @@ def page_portal() -> None:
     id_paciente = user["id_paciente"]
     decision = ctx.authorize_once("portal.propio", id_paciente)
     if not decision.allowed:
-        banner(f"⛔ {esc(decision.reason)}", "danger")
+        banner(f"{esc(decision.reason)}", "danger")
         return
     clin = ctx.get_clin()
     st.markdown(f'<div class="brand"><h1 style="color:#111827">Hola, {esc(user["nombre_mostrado"])}</h1></div>',
                 unsafe_allow_html=True)
     st.caption("Aquí solo ves tu propia información. Ningún otro paciente puede verla.")
-    tab_rx, tab_appt = st.tabs(["💊 Mis fórmulas", "📅 Mis citas"])
+    tab_rx, tab_appt = st.tabs(["Mis fórmulas", "Mis citas"])
     with tab_rx:
         rx = ps.patient_prescriptions(clin, id_paciente)
         if not rx:
@@ -323,12 +323,12 @@ def page_portal() -> None:
             col1, col2 = st.columns([3, 1.3], vertical_alignment="center")
             col1.markdown(f"Para volver a recibir **{esc(r['producto'].capitalize())}** necesitas una cita de reevaluación.")
             if already:
-                col2.markdown(chip("Cita solicitada", "ok", "✅"), unsafe_allow_html=True)
+                col2.markdown(chip("Cita solicitada", "ok"), unsafe_allow_html=True)
             elif col2.button("Solicitar cita", key=f"reeval_{r['id']}", type="primary", width="stretch"):
                 when = (_dt(ctx.clock()) + timedelta(days=1)).replace(hour=8, minute=0, second=0).strftime(FMT)
                 try:
                     ps.request_reevaluation(clin, id_paciente, r["id"], when, ctx.clock())
-                    st.toast("Cita de reevaluación solicitada", icon="📅")
+                    st.toast("Cita de reevaluación solicitada", icon=":material/event:")
                     st.rerun()
                 except sqlite3.IntegrityError as exc:
                     st.error(str(exc))

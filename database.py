@@ -258,29 +258,40 @@ def build_beds(adm: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_daily_occupancy(adm: pd.DataFrame, beds: pd.DataFrame, ref_day: pd.Timestamp) -> pd.DataFrame:
-    """Camas ocupadas por día y subgrupo: una cama cuenta como ocupada si alguna estancia
-    estimada se cruza con ese día calendario."""
+    """Censo diario por subgrupo sobre CAMAS FÍSICAS: una cama cuenta como ocupada si alguna estancia
+    estimada se cruza con ese día calendario.
+
+    capacidad / camas_ocupadas / porcentaje_ocupacion = solo camas físicas. Las camas que el HIS marca como
+    "VIRTUAL" son capacidad de expansión: se reportan aparte (camas_virtuales, camas_expansion_ocupadas) y
+    no inflan la capacidad (con ellas, Hospitalización 3 aparecía al 64,5 % estando al 93 %).
+    Subgrupos sin camas físicas (p. ej. Urgencias adultos) quedan con capacidad 0 y porcentaje NULL."""
     stays = adm.dropna(subset=["fecha_inicio_estancia"]).copy()
     stays["d0"] = stays["fecha_inicio_estancia"].dt.normalize()
     stays["d1"] = stays["fecha_fin_estimada"].dt.normalize().clip(upper=ref_day)
     stays = stays[stays["d1"] >= stays["d0"]]
     stays["fecha"] = [pd.date_range(a, b, freq="D") for a, b in zip(stays["d0"], stays["d1"])]
     daily = stays[["fecha", "oid_ingreso", "codigo_cama", "subgrupo_cama"]].explode("fecha")
+    daily = daily.merge(beds[["codigo_cama", "es_virtual"]], on="codigo_cama", how="left")
+    daily["cama_fisica"] = daily["codigo_cama"].where(daily["es_virtual"] == 0)
+    daily["cama_virtual"] = daily["codigo_cama"].where(daily["es_virtual"] == 1)
     occ = (daily.groupby(["fecha", "subgrupo_cama"])
-           .agg(camas_ocupadas=("codigo_cama", "nunique"), pacientes=("oid_ingreso", "nunique"))
+           .agg(camas_ocupadas=("cama_fisica", "nunique"), camas_expansion_ocupadas=("cama_virtual", "nunique"),
+                pacientes=("oid_ingreso", "nunique"))
            .reset_index())
 
-    capacity = (beds.groupby(["servicio", "grupo_cama", "subgrupo_cama"])
-                .agg(capacidad=("codigo_cama", "nunique"), camas_virtuales=("es_virtual", "sum"))
+    capacity = (beds.assign(fisica=1 - beds["es_virtual"])
+                .groupby(["servicio", "grupo_cama", "subgrupo_cama"])
+                .agg(capacidad=("fisica", "sum"), camas_virtuales=("es_virtual", "sum"))
                 .reset_index())
     all_days = pd.date_range(adm["fecha_ingreso"].min().normalize(), ref_day, freq="D")
     grid = capacity.merge(pd.DataFrame({"fecha": all_days}), how="cross")
-    out = grid.merge(occ, on=["fecha", "subgrupo_cama"], how="left").fillna({"camas_ocupadas": 0, "pacientes": 0})
-    out[["camas_ocupadas", "pacientes"]] = out[["camas_ocupadas", "pacientes"]].astype(int)
-    out["porcentaje_ocupacion"] = (out["camas_ocupadas"] / out["capacidad"] * 100).round(1)
+    counts = ["camas_ocupadas", "camas_expansion_ocupadas", "pacientes"]
+    out = grid.merge(occ, on=["fecha", "subgrupo_cama"], how="left").fillna({c: 0 for c in counts})
+    out[counts + ["capacidad", "camas_virtuales"]] = out[counts + ["capacidad", "camas_virtuales"]].astype(int)
+    out["porcentaje_ocupacion"] = (out["camas_ocupadas"] / out["capacidad"].where(out["capacidad"] > 0) * 100).round(1)
     out["fecha"] = out["fecha"].dt.strftime("%Y-%m-%d")
     return out[["fecha", "servicio", "grupo_cama", "subgrupo_cama", "capacidad", "camas_virtuales",
-                "camas_ocupadas", "pacientes", "porcentaje_ocupacion"]]
+                "camas_ocupadas", "camas_expansion_ocupadas", "pacientes", "porcentaje_ocupacion"]]
 
 
 def build_services(raw: pd.DataFrame) -> pd.DataFrame:
@@ -523,23 +534,22 @@ def month_to_date(ref: date) -> tuple[date, date]:
 # ---------------------------------------------------------------------------
 # KPIs hospitalarios (reutilizados por dashboard, API y agente)
 # ---------------------------------------------------------------------------
-def kpi_bed_occupancy(conn, day: date | None = None, by: str = "servicio",
-                      include_virtual: bool = False) -> pd.DataFrame:
-    """Ocupación de camas en un día. by = 'servicio' | 'subgrupo_cama'."""
+def kpi_bed_occupancy(conn, day: date | None = None, by: str = "servicio") -> pd.DataFrame:
+    """Ocupación de camas FÍSICAS en un día. by = 'servicio' | 'subgrupo_cama'.
+    Los subgrupos sin camas físicas (solo virtuales) no tienen porcentaje y se omiten."""
     day = day or get_reference_date(conn)
     cols = "servicio" if by == "servicio" else "servicio, subgrupo_cama"
-    virtual_filter = "" if include_virtual else "AND camas_virtuales < capacidad"
     df = query_df(conn, f"""
         SELECT {cols}, SUM(capacidad) AS capacidad, SUM(camas_ocupadas) AS camas_ocupadas,
-               SUM(pacientes) AS pacientes
-        FROM ocupacion_diaria WHERE fecha = ? {virtual_filter}
+               SUM(camas_expansion_ocupadas) AS camas_expansion_ocupadas, SUM(pacientes) AS pacientes
+        FROM ocupacion_diaria WHERE fecha = ? AND capacidad > 0
         GROUP BY {cols} ORDER BY camas_ocupadas DESC""", (day.isoformat(),))
     df["porcentaje_ocupacion"] = (df["camas_ocupadas"] / df["capacidad"] * 100).round(1)
     return df
 
 
 def kpi_global_occupancy(conn, day: date | None = None) -> dict:
-    """Ocupación global de camas físicas (excluye Urgencias con camas virtuales)."""
+    """Ocupación global de camas físicas de internación (excluye Urgencias y las camas virtuales)."""
     df = kpi_bed_occupancy(conn, day)
     df = df[df["servicio"] != "Urgencias"]
     cap, occ = df["capacidad"].sum(), df["camas_ocupadas"].sum()
@@ -550,7 +560,7 @@ def kpi_global_occupancy(conn, day: date | None = None) -> dict:
 def kpi_occupancy_trend(conn, start: date, end: date) -> pd.DataFrame:
     df = query_df(conn, """
         SELECT fecha, servicio, SUM(capacidad) AS capacidad, SUM(camas_ocupadas) AS camas_ocupadas
-        FROM ocupacion_diaria WHERE fecha BETWEEN ? AND ? AND servicio <> 'Urgencias'
+        FROM ocupacion_diaria WHERE fecha BETWEEN ? AND ? AND servicio <> 'Urgencias' AND capacidad > 0
         GROUP BY fecha, servicio ORDER BY fecha""", (start.isoformat(), end.isoformat()))
     df["porcentaje_ocupacion"] = (df["camas_ocupadas"] / df["capacidad"] * 100).round(1)
     return df
@@ -753,9 +763,16 @@ _ROOM_CODE = re.compile(r"^([GH])-(\d)(\d{2})([A-Z]?)$")
 TRIAGE_TARGET_MIN = {1: 0, 2: config.WAIT_TARGET_TRIAGE2_MIN}
 
 
+_ACCENTS = {"Hospitalizacion": "Hospitalización", "Pediatria": "Pediatría", "Pediatrico": "Pediátrico",
+            "Basico": "Básico", "Recuperacion": "Recuperación", "Ginecologia": "Ginecología",
+            "Obstetricia": "Obstetricia", "Cuidad": "Cuidado"}
+_SMALL_WORDS = {"De", "Del", "La", "Las", "Los", "Y"}
+
+
 def unit_label(subgroup: str | None) -> str:
-    """Nombre legible de la unidad ('UNIDAD DE CUIDAD BASICO NEONATAL' -> 'Unidad De Cuidado Basico Neonatal')."""
-    return str(subgroup or "Sin unidad").replace("CUIDAD ", "CUIDADO ").title()
+    """Nombre legible de la unidad: 'UNIDAD DE CUIDAD BASICO NEONATAL' -> 'Unidad de Cuidado Básico Neonatal'."""
+    words = str(subgroup or "Sin unidad").title().split()
+    return " ".join(w.lower() if i and w in _SMALL_WORDS else _ACCENTS.get(w, w) for i, w in enumerate(words))
 
 
 def bed_population(subgroup: str | None) -> str:

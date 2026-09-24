@@ -15,7 +15,7 @@ from agent import fmt_num
 from ui import context as ctx
 from ui.theme import AMBER, BORDER, EMERALD, MUTED, TEXT, chip, esc
 
-LONG_STAY_DAYS = 10
+SHORT_STAY_DAYS, LONG_STAY_DAYS = 10, 15
 CRITICAL_WORDS = ("INTENSIV", "INTERMEDIO", "BASICO NEONATAL", "CUIDAD BASICO")
 
 CSS = f"""
@@ -39,7 +39,8 @@ CSS = f"""
       cursor:default;}}
   .bed.free {{background:{EMERALD};}}
   .bed.busy {{background:#EF4444;}}
-  .bed.long {{background:#B91C1C; outline:2px dashed {AMBER}; outline-offset:1px;}}
+  .bed.mid {{background:#EA580C;}}
+  .bed.long {{background:#7F1D1D; outline:2px dashed {AMBER}; outline-offset:1px;}}
   .unit-beds {{display:flex; gap:0.35rem; flex-wrap:wrap; background:#FFF; border:1px solid {BORDER};
       border-radius:10px; padding:0.6rem;}}
   .unit-beds .bed {{min-width:3.4rem;}}
@@ -58,14 +59,17 @@ def _beds(day_iso: str):
 
 
 def _bed_html(r, label: str) -> str:
-    if r.ocupada:
-        long_stay = r.dias_estancia == r.dias_estancia and r.dias_estancia >= LONG_STAY_DAYS
-        tip = f"{r.ubicacion} · Ocupada · {fmt_num(r.dias_estancia, 1)} días de estancia"
-        if long_stay:
-            tip += " · revisar plan de salida"
-        cls = "bed busy long" if long_stay else "bed busy"
+    """Verde libre · rojo ocupada < 10 días · naranja 10 a 15 días · vino con borde más de 15 días."""
+    if not r.ocupada:
+        return f'<span class="bed free" title="{esc(r.ubicacion)} · Libre">{esc(label)}</span>'
+    days = r.dias_estancia if r.dias_estancia == r.dias_estancia else 0
+    if days > LONG_STAY_DAYS:
+        cls, note = "bed busy long", f"más de {LONG_STAY_DAYS} días · revisar plan de salida"
+    elif days >= SHORT_STAY_DAYS:
+        cls, note = "bed busy mid", f"entre {SHORT_STAY_DAYS} y {LONG_STAY_DAYS} días"
     else:
-        tip, cls = f"{r.ubicacion} · Libre", "bed free"
+        cls, note = "bed busy", f"menos de {SHORT_STAY_DAYS} días"
+    tip = f"{r.ubicacion} · Ocupada {fmt_num(days, 0)} días ({note})"
     return f'<span class="{cls}" title="{esc(tip)}">{esc(label)}</span>'
 
 
@@ -134,7 +138,7 @@ def _finder(beds) -> None:
                         + (f"Se pueden habilitar <b>{len(virt)}</b> camas de expansión." if not virt.empty
                            else "Coordinar traslado a otra institución."), unsafe_allow_html=True)
             return
-        st.markdown(f'<div class="found">{"".join(f"<span>🛏️ {esc(r.ubicacion)}</span>" for r in free.head(4).itertuples())}'
+        st.markdown(f'<div class="found">{"".join(f"<span>{esc(r.ubicacion)}</span>" for r in free.head(4).itertuples())}'
                     f'</div>', unsafe_allow_html=True)
         if len(free) > 4:
             st.caption(f"y {len(free) - 4} más")
@@ -162,8 +166,9 @@ def page_camas() -> None:
 
     legend, toggle = st.columns([3, 1.2], vertical_alignment="center")
     legend.markdown(f'<div class="map-legend"><span><i class="sw" style="background:{EMERALD}"></i>Libre</span>'
-                    f'<span><i class="sw" style="background:#EF4444"></i>Ocupada</span>'
-                    f'<span><i class="sw" style="background:#B91C1C;outline:2px dashed {AMBER}"></i>'
+                    f'<span><i class="sw" style="background:#EF4444"></i>Menos de {SHORT_STAY_DAYS} días</span>'
+                    f'<span><i class="sw" style="background:#EA580C"></i>{SHORT_STAY_DAYS} a {LONG_STAY_DAYS} días</span>'
+                    f'<span><i class="sw" style="background:#7F1D1D;outline:2px dashed {AMBER}"></i>'
                     f'Más de {LONG_STAY_DAYS} días</span></div>', unsafe_allow_html=True)
     only_free = toggle.toggle("Solo libres", key="map_only_free")
 
@@ -192,6 +197,7 @@ def page_camas() -> None:
                     "habitación 203, cama C. Las unidades sin ese código (UCI, intermedios, observación) se "
                     "muestran por unidad.\n"
                     "- **Estado** de cada cama: censo del día de corte de los datos.\n"
-                    f"- **{LONG_STAY_DAYS} días o más** internado: conviene revisar el plan de salida.\n"
+                    f"- **Colores de ocupada:** según los días que lleva el paciente en la cama. Más de "
+                    f"{LONG_STAY_DAYS} días: conviene revisar el plan de salida.\n"
                     "- **Camas de expansión:** capacidad adicional que el sistema registra como “virtual”.\n"
                     "- Los datos no traen pasillo ni ala; si el hospital los entrega, se agregan a esta vista.")

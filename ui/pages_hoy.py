@@ -98,8 +98,7 @@ def _stat(label: str, value: str, unit: str, icon: str, color: str, bg: str, bar
         fg, dbg = ("#065F46", "#D1FAE5") if delta_good else ("#991B1B", "#FEE2E2")
         delta_html = f'<span class="stat-delta" style="color:{fg};background:{dbg}">{esc(delta)}</span>'
     return (f'<div class="stat" style="--c:{color};--bg:{bg}"><div class="stat-top">'
-            f'<div class="stat-icon">{icon}</div>{delta_html}</div>'
-            f'<div class="stat-label">{esc(label)}</div>'
+            f'<div class="stat-label" style="margin:0">{esc(label)}</div>{delta_html}</div>'
             f'<div class="stat-value">{esc(value)}<small>{esc(unit)}</small></div>'
             f'{bar_html}<div class="stat-foot">{esc(foot)}</div></div>')
 
@@ -156,8 +155,10 @@ def _staff_today() -> None:
     w7 = ctx.cached("kpi_wait_times", ref - timedelta(days=6), ref)
     w7_prev = ctx.cached("kpi_wait_times", ref - timedelta(days=13), ref - timedelta(days=7))
     queue = _queue(now.strftime(FMT))
-    alerts = ctx.get_agent().alerts()
-    critical = [a for a in alerts if a.severity == "crítica"]
+    alerts = ctx.alerts()
+    from ui.notifications import collect
+    critical = [n for n in collect(user["rol"], user, ctx.get_clin(), ctx.get_conn(), ctx.clock(), alerts)
+                if n.severity == "crítica"]
 
     # --- 1. Cuatro cifras ---
     d_occ = occ["pct"] - occ_prev["pct"]
@@ -167,16 +168,16 @@ def _staff_today() -> None:
     n_q = len(queue)
     urgent = int(levels.get(1, 0) + levels.get(2, 0)) if n_q else 0
     st.markdown('<div class="stat-grid">' + "".join([
-        _stat("Camas ocupadas", f"{fmt_num(occ['pct'], 1)} %", "", "🛏️", occ_color, "#EFF6FF",
+        _stat("Camas ocupadas", f"{fmt_num(occ['pct'], 1)} %", "", "", occ_color, "#EFF6FF",
               _bar([(occ["pct"] / 100, occ_color)]), f"{occ['libres']} camas libres",
               f"{d_occ:+.1f} vs. ayer", d_occ <= 0),
-        _stat("Espera en urgencias", fmt_minutes(avg), "", "⏱️", AMBER, "#FFF7ED",
+        _stat("Espera en urgencias", fmt_minutes(avg), "", "", AMBER, "#FFF7ED",
               _bar([(min((avg or 0) / 120, 1), AMBER)]), "promedio de los últimos 7 días",
               f"{avg - prev_avg:+.0f} min" if avg and prev_avg else None, bool(avg and prev_avg and avg <= prev_avg)),
-        _stat("Esperando atención", fmt_num(n_q), "pacientes", "🚑", RED if urgent else BLUE, "#FEF2F2",
+        _stat("Esperando atención", fmt_num(n_q), "pacientes", "", RED if urgent else BLUE, "#FEF2F2",
               _bar([(levels.get(k, 0) / n_q if n_q else 0, TRIAGE_COLOR[k]) for k in (1, 2, 3, 4, 5)]),
               f"{urgent} urgentes (triage I–II)" if urgent else "ninguno urgente"),
-        _stat("Alertas críticas", fmt_num(len(critical)), "", "⚠️", RED if critical else EMERALD, "#FEF9C3",
+        _stat("Alertas críticas", fmt_num(len(critical)), "", "", RED if critical else EMERALD, "#FEF9C3",
               _bar([(min(len(critical) / 5, 1), RED if critical else EMERALD)]),
               "detalle abajo" if critical else "todo en orden"),
     ]) + "</div>", unsafe_allow_html=True)
@@ -203,13 +204,13 @@ def _do_now(user: dict, alerts) -> None:
         items = [n for n in items if not n.id.startswith("alerta:")] + [n for n in items if n.id.startswith("alerta:")]
     items = items[:5]
     if not items:
-        st.success("Todo al día. No hay nada pendiente para tu rol.", icon="✅")
+        st.success("Todo al día. No hay nada pendiente para tu rol.", icon=":material/check_circle:")
         return
     beds = _beds(ctx.ref_date().isoformat())
     for i, n in enumerate(items):
         hint = n.detail.split(". ")[0].split(", priorizar")[0].rstrip(".")
         if n.slug == "camas":  # ocupación: la cama libre compatible ya ubicada
-            unit = next((u for u in beds["subgrupo_cama"].unique() if n.title.startswith(str(u).title())), None)
+            unit = next((u for u in beds["subgrupo_cama"].unique() if n.title.startswith(db.unit_label(u))), None)
             if unit is not None:
                 free = beds[(beds["ocupada"] == 0) & (beds["es_virtual"] == 0) & (beds["servicio"] != "Urgencias")
                             & (beds["poblacion"] == db.bed_population(unit))]
@@ -265,7 +266,7 @@ def _patient_today() -> None:
     blocked = [r for r in rx if r["estado"] == "CADUCADA" and r["requiere_reevaluacion"]]
     upcoming = sorted((c for c in appts if c["estado"] == "PROGRAMADA"), key=lambda c: c["fecha_hora"])
 
-    st.markdown(f'<div class="today-head"><div><h2>Hola, {esc(user["nombre_mostrado"])} 👋</h2>'
+    st.markdown(f'<div class="today-head"><div><h2>Hola, {esc(user["nombre_mostrado"])}</h2>'
                 f'<p>{esc(_long_date(now.date())).capitalize()} · esto es lo que tienes pendiente</p></div></div>',
                 unsafe_allow_html=True)
 
@@ -283,10 +284,10 @@ def _patient_today() -> None:
     else:
         ap_value, ap_foot = "—", "Sin citas programadas"
     st.markdown('<div class="stat-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">' + "".join([
-        _stat("Medicamentos por reclamar", rx_value, "fórmula" if rx_value == "1" else "fórmulas", "💊", rx_color, "#FFF7ED",
+        _stat("Medicamentos por reclamar", rx_value, "fórmula" if rx_value == "1" else "fórmulas", "", rx_color, "#FFF7ED",
               _bar([(1.0 if pending else 0, rx_color)]), rx_foot),
-        _stat("Próxima cita", ap_value, "", "📅", BLUE, "#EFF6FF", _bar([(1.0 if upcoming else 0, BLUE)]), ap_foot),
-        _stat("Acciones pendientes", str(len(blocked)), "por resolver", "✅", RED if blocked else EMERALD, "#F0FDF4",
+        _stat("Próxima cita", ap_value, "", "", BLUE, "#EFF6FF", _bar([(1.0 if upcoming else 0, BLUE)]), ap_foot),
+        _stat("Acciones pendientes", str(len(blocked)), "por resolver", "", RED if blocked else EMERALD, "#F0FDF4",
               _bar([(1.0 if blocked else 0, RED if blocked else EMERALD)]),
               "Pide cita para renovar tu fórmula" if blocked else "Todo al día"),
     ]) + "</div>", unsafe_allow_html=True)
@@ -295,18 +296,18 @@ def _patient_today() -> None:
     steps = []
     for r in pending:
         limit = datetime.strptime(r["fecha_limite_reclamo"], FMT)
-        steps.append(("💊", f"Reclama **{r['producto'].capitalize()}** en farmacia antes del "
+        steps.append(("", f"Reclama **{r['producto'].capitalize()}** en farmacia antes del "
                             f"**{limit:%d/%m a las %H:%M}** ({r['dosis_prescritas'] - r['dosis_entregadas']} dosis pendientes)."))
     for r in blocked:
-        steps.append(("📅", f"Tu fórmula de **{r['producto'].capitalize()}** venció. Solicita una cita de "
+        steps.append(("", f"Tu fórmula de **{r['producto'].capitalize()}** venció. Solicita una cita de "
                             "reevaluación para volver a recibirla."))
     for c in upcoming[:2]:
         when = datetime.strptime(c["fecha_hora"], FMT)
-        steps.append(("🩺", f"Asiste a tu cita de **{c['especialidad'].title()}** el **{when:%d/%m a las %H:%M}**."))
+        steps.append(("", f"Asiste a tu cita de **{c['especialidad'].title()}** el **{when:%d/%m a las %H:%M}**."))
     if not steps:
-        st.success("No tienes nada pendiente. ¡Que estés muy bien!", icon="🌿")
-    for icon, text in steps:
+        st.success("No tienes nada pendiente. ¡Que estés muy bien!", icon=":material/check_circle:")
+    for _, text in steps:
         with st.container(border=True):
-            st.markdown(f"{icon}  {text}")
-    _link("portal", "Ver mis fórmulas y citas", "🧑")
+            st.markdown(text)
+    _link("portal", "Ver mis fórmulas y citas", ":material/arrow_forward:")
     st.caption("Solo tú ves esta información. El personal del hospital accede a ella con registro en la bitácora.")

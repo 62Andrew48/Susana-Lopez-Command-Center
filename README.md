@@ -45,7 +45,7 @@ cp .env.example .env              # y configura LLM_PROVIDER + API key para acti
 python database.py --rebuild      # reconstruir la base manualmente
 uvicorn api:app --port 8000       # API REST -> http://localhost:8000/docs
 python agent.py                   # demo por consola de las 4 preguntas
-python -m pytest -q               # 121 pruebas (seguridad, intenciones, LLM simulado, ciclo clínico, RBAC, operación, microservicios)
+python -m pytest -q               # 129 pruebas (seguridad, intenciones, LLM simulado, ciclo clínico, RBAC, operación, microservicios)
 ```
 
 Sin `.env` todo funciona en modo **Plan B** (sin red y sin costo).
@@ -63,6 +63,10 @@ La interfaz se reorganizó para que cada rol vea primero lo que tiene que hacer,
   (`H-203C` = piso 2, habitación 203, cama C). Buscador de un clic: *¿dónde hay cama libre para un adulto, un niño,
   un recién nacido, maternidad o UCI?* Las camas virtuales se muestran como **capacidad de expansión**.
 - **Campana de notificaciones** por rol, con enlace a donde se resuelve cada aviso.
+- **Inicio de sesión** con usuario y contraseña, tarjeta del usuario (iniciales, rol, turno) y cierre de sesión.
+- **Inventario de farmacia** (gerencia): existencias, llegada de pedidos (incluida la orden completa de urgentes),
+  conteo físico con ajuste y motivo, y el historial de movimientos. El stock nunca se edita: todo es un movimiento
+  del libro mayor, y las alertas de farmacia se recalculan al instante.
 - **Asistente flotante** en todas las páginas, con alcance por permisos:
 
 | Rol | Qué puede preguntar |
@@ -194,7 +198,8 @@ sequenceDiagram
 | `demo_seed.py` | — | Escenario de demostración y reloj clínico |
 | `api.py` | Servicio | Endpoints REST del reto |
 | `ml_services.py` | Servicio | Cliente de los microservicios con tiempo máximo y circuit breaker |
-| `tests/` | — | 121 pruebas: seguridad SQL, intenciones, LLM simulado, ciclo clínico, RBAC, camas, cola, notificaciones y alcance del asistente |
+| `auth.py` | Servicio | Inicio y cierre de sesión con bloqueo por intentos y auditoría |
+| `tests/` | — | 129 pruebas: seguridad SQL, intenciones, LLM simulado, ciclo clínico, RBAC, camas, cola, notificaciones y alcance del asistente |
 
 ## Modelo de datos (`hospital.db`)
 
@@ -207,7 +212,7 @@ sequenceDiagram
 | `servicios` | 582.357 | Procedimientos CUPS, área y especialidad |
 | `medicamentos_insumos` | 579.465 | Dispensación + tipo de ítem |
 | `inventario_farmacia` | 1.327 | Consumo 30 días, rotación, stock, días de inventario |
-| `ocupacion_diaria` | 2.736 | Censo diario por unidad: capacidad, ocupadas, % |
+| `ocupacion_diaria` | 2.736 | Censo diario por unidad sobre camas físicas + camas de expansión en uso |
 | `camas` | 712 | Catálogo de camas observadas (capacidad) |
 | `cirugias` | 6.156 | Programación consolidada y estado (realizada / sin evidencia) |
 
@@ -229,9 +234,11 @@ Estas decisiones salieron de perfilar el extracto antes de programar; conviene m
 - **No hay existencias de farmacia.** El consumo diario es real; el stock se simula de forma determinística y
   queda marcado (`stock_simulado = 1`). Si farmacia entrega `Datos/Inventario.txt` (`CodigoServicio|Stock`),
   el cálculo pasa a ser real sin tocar código.
-- **Camas físicas y virtuales.** El HIS registra 223 camas "virtuales" fuera de Urgencias (capacidad de
-  expansión). La página Hoy, el mapa y la tendencia calculan la ocupación sobre las **300 camas físicas**
-  (86,3 % el 21/09) y muestran aparte los pacientes en camas de expansión (108).
+- **Camas físicas y virtuales.** El HIS registra 223 camas "virtuales" fuera de Urgencias: capacidad de
+  expansión que se habilita cuando las físicas no alcanzan. Toda la app (tablero, agente, alertas, API, mapa)
+  mide la ocupación sobre las **300 camas físicas** (86,3 % el 21/09) y reporta aparte los pacientes en camas
+  de expansión (108). Contar las virtuales como capacidad escondía saturación real: Hospitalización 3 aparecía
+  al 64,5 % estando al 93 %, y el cuidado básico neonatal al 63 % estando al 100 %.
 - **Ubicación física.** El código de cama trae piso y habitación en hospitalización y gineco-obstetricia
   (`H-203C`, `G-108B`); las demás unidades solo traen unidad y número. Los datos no traen pasillo ni ala.
 - **Cola de urgencias.** Un paciente está "esperando" a la hora `t` si ingresó por urgencias antes de `t` y su
@@ -276,7 +283,7 @@ hoy la hospitalización 2 está al 100 %." Mostrar la pestaña de alertas.
 
 | Pregunta | Respuesta con los datos del reto |
 |---|---|
-| ¿Cuántas camas de UCI están ocupadas hoy? | 30 de 46 (65,2 %); la UCI neonatal está al 83,3 % |
+| ¿Cuántas camas de UCI están ocupadas hoy? | 26 de 37 camas físicas (70,3 %); la UCI neonatal está al 86,7 % |
 | ¿Medicamentos con menos de 5 días de inventario? | 47 medicamentos (stock simulado, consumo real); el más crítico, cloruro de sodio 20 mEq, con 1 día |
 | ¿Espera promedio en urgencias la última semana? | 1 h 0 min en 796 atenciones; Triage 2 espera 46 min frente a la meta de 30 |
 | ¿Qué servicio tiene más pacientes este mes? | Urgencias, con 1.093 pacientes (44,4 %); le sigue Pediatría con 405 |
@@ -303,8 +310,9 @@ FastAPI (integración con el HIS), SQLite (cero instalación), LLM intercambiabl
   cualquier equipo. El acceso a datos está aislado en `database.py`; migrar es cambiar la conexión.
 - *El modelo sugerido traía fecha de salida, médico asignado y fecha de vencimiento, ¿dónde están?* No existen
   en el extracto entregado. Por eso la estancia se estima y el stock se simula, y así se declara en pantalla.
-- *¿Hay login?* Hay control de acceso por roles y permisos en base de datos (con auditoría); el ingreso es un
-  selector de usuarios de demostración. El esquema ya guarda la contraseña con hash, falta la pantalla de login.
+- *¿Hay login?* Sí: usuario y contraseña contra `clinico.db`, solo cuentas activas, bloqueo de 15 minutos tras
+  5 intentos fallidos y cada intento en la bitácora (`auth.py`). La demo usa sha256; en producción, argon2/bcrypt y
+  sesión con JWT. Los permisos se validan en el servidor en cada página y en el asistente.
 
 ## Limitaciones y mejoras futuras
 
@@ -314,7 +322,7 @@ FastAPI (integración con el HIS), SQLite (cero instalación), LLM intercambiabl
 | Extracto histórico sin egresos ni traslados de cama | Integración en tiempo real con la Historia Clínica Electrónica (HL7 FHIR) |
 | Stock simulado | Conector al inventario de farmacia |
 | Alertas por reglas y umbrales | **Machine learning** (Prophet / gradient boosting) para pronosticar ingresos y consumo por patología |
-| Ingreso con selector de usuarios de demostración (el RBAC y la auditoría sí son reales) | Pantalla de login con contraseña (hash ya en el esquema) y sesión con JWT |
+| Contraseñas de demostración con sha256 y sesión en memoria de Streamlit | argon2/bcrypt, JWT y proveedor de identidad institucional |
 
 ## Tecnologías
 

@@ -27,7 +27,7 @@ class _StatusLogHandler(logging.Handler):
         self.status = status
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.status.write(f"✓ {record.getMessage()}")
+        self.status.write(f"{record.getMessage()}")
 
 
 def analytics_ready() -> bool:
@@ -85,6 +85,13 @@ def get_clin():
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def alerts() -> list:
+    """Alertas del motor de recomendaciones. Salen de la base analítica (no cambian con los clics):
+    se calculan una vez cada 10 minutos en lugar de en cada interacción."""
+    return get_agent().alerts()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def cached(fn_name: str, *args, **kwargs):
     """Cachea cualquier KPI de database.py por nombre y argumentos."""
     return getattr(db, fn_name)(get_conn(), *args, **kwargs)
@@ -107,7 +114,7 @@ def reset_analytics_resources() -> None:
     get_conn().close()
     for resource in (get_agent, get_conn):
         resource.clear()
-    st.cache_data.clear()
+    st.cache_data.clear()   # incluye alerts()
 
 
 def reset_clinical_demo() -> None:
@@ -121,12 +128,17 @@ def reset_clinical_demo() -> None:
 # ---------------------------------------------------------------------------
 # Usuario activo, permisos y reloj
 # ---------------------------------------------------------------------------
-DEMO_SELECTOR = {1: "🏛️ Admin · Gerencia", 2: "🩺 Dra. Ruiz · Doctor", 3: "💉 Enf. Gómez · Enfermería",
-                 4: "🧑 Paciente 110 · Portal"}
+def user_id() -> int | None:
+    """Usuario autenticado (lo fija ui/session.py al iniciar sesión). None si nadie ha iniciado sesión."""
+    return st.session_state.get("user_id")
 
 
-def user_id() -> int:
-    return st.session_state.setdefault("user_id", 1)
+def logged_in() -> bool:
+    uid = user_id()
+    if uid is None:
+        return False
+    row = get_clin().execute("SELECT estado_cuenta FROM usuarios WHERE id = ?", (uid,)).fetchone()
+    return row is not None and row["estado_cuenta"] == "ACTIVO"
 
 
 def current_user() -> dict:

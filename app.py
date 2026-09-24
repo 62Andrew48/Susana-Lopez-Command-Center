@@ -4,8 +4,8 @@ app.py — Punto de entrada de la interfaz (Streamlit ≥ 1.46).
     streamlit run app.py
 
 Estructura:
-  * Cabecera contextual persistente: usuario (selector de demo), campana de notificaciones por rol, turno,
-    acceso de emergencia y reloj.
+  * Inicio de sesión (auth.py) antes de mostrar cualquier dato; tarjeta del usuario con cierre de sesión.
+  * Cabecera con el logo, campana de notificaciones por rol y reloj de la demostración.
   * Menú lateral agrupado (Operación · Clínico · Gestión) filtrado por permisos (RBAC de clinico.db).
     La página de inicio es "Hoy". st.navigation ejecuta SOLO la página activa.
   * Subsecciones dentro de cada página con st.tabs / st.expander.
@@ -30,10 +30,12 @@ from ui import pages_analytics as pa
 from ui import pages_camas as pm
 from ui import pages_clinical as pc
 from ui import pages_hoy as ph
+from ui import pages_inventario as pi
 from ui import pages_predicciones as pp
+from ui import session as ss
 from ui.theme import chip, inject_css
 
-st.set_page_config(page_title="HSLV · Centro de mando operativo", page_icon="🏥", layout="wide")
+st.set_page_config(page_title="HSLV · Centro de mando", page_icon=str(ss.LOGO_ICON), layout="wide")
 inject_css()
 
 # --- Inicialización (con progreso visible si la base analítica no existe) ---
@@ -41,66 +43,62 @@ if not ctx.analytics_ready():
     ctx.build_analytics_with_status("Inicializando base de datos hospitalaria...", rebuild=config.DB_PATH.exists())
 clin = ctx.get_clin()
 
+# --- Inicio de sesión: sin sesión válida no se muestra nada más ---
+if not ctx.logged_in():
+    st.session_state.pop("user_id", None)
+    ss.login_page()
+    st.stop()
+
+
 
 def _clock_label() -> str:
     return f"{datetime.strptime(ctx.clock(), '%Y-%m-%d %H:%M:%S'):%d/%m/%Y %H:%M}"
 
 
 # ---------------------------------------------------------------------------
-# Cabecera contextual persistente
+# Cabecera: marca, notificaciones y reloj de la demostración
 # ---------------------------------------------------------------------------
-brand, who, bell_col, clock_col = st.columns([2.2, 1.6, 0.5, 0.9], vertical_alignment="center")
-brand.markdown('<div class="brand"><h1>Hospital Susana López de Valencia</h1>'
-               '<p>Centro de mando</p></div>', unsafe_allow_html=True)
-selected = who.selectbox("Usuario (demo)", list(ctx.DEMO_SELECTOR), format_func=ctx.DEMO_SELECTOR.get,
-                         index=list(ctx.DEMO_SELECTOR).index(ctx.user_id()),
-                         help="Selector simulado para la demostración. En producción: login con JWT.")
-if selected != ctx.user_id():
-    st.session_state.user_id = selected
-    st.rerun()
+brand, bell_col, clock_col = st.columns([4, 0.55, 0.9], vertical_alignment="center")
+brand.markdown(f'<div class="brand">{ss.logo_html(46)}<div><h1>Hospital Susana López de Valencia</h1>'
+               '<p>Centro de mando · E.S.E. Popayán</p></div></div>', unsafe_allow_html=True)
 
-with clock_col.popover(f"🕒 {datetime.strptime(ctx.clock(), '%Y-%m-%d %H:%M:%S'):%H:%M}", width="stretch",
+with clock_col.popover(f":material/schedule: {datetime.strptime(ctx.clock(), '%Y-%m-%d %H:%M:%S'):%H:%M}", width="stretch",
                        help="Reloj de la demostración: cambia la hora para simular turnos"):
     st.caption(f"Reloj clínico: **{_clock_label()}**")
-    if st.button("☀️ Turno de día (10:00)", width="stretch"):
+    if st.button("Turno de día (10:00)", icon=":material/light_mode:", width="stretch"):
         ds.set_clock_hour(clin, 10)
         st.rerun()
-    if st.button("🌙 Turno de noche (22:00)", width="stretch",
+    if st.button("Turno de noche (22:00)", icon=":material/dark_mode:", width="stretch",
                  help="Nadie está en turno: permite demostrar el acceso de emergencia"):
         ds.set_clock_hour(clin, 22)
         st.rerun()
     st.divider()
-    if st.button("↺ Reiniciar escenario clínico", width="stretch",
+    if st.button("Reiniciar escenario clínico", icon=":material/restart_alt:", width="stretch",
                  help="Borra clinico.db y vuelve a sembrar la demo. No toca la base analítica."):
         ctx.reset_clinical_demo()
         st.rerun()
 
 user = ctx.current_user()
-chips = [chip(user["rol_nombre"], "info", "👤")]
-if user["rol"] in ("DOCTOR", "ENFERMERIA"):
-    turno = ctx.shift()
-    chips.append(chip(f"En turno · {turno['servicio']} hasta {turno['fin'][11:16]}", "ok", "●") if turno
-                 else chip("Fuera de turno · requiere “romper el vidrio”", "warn", "●"))
-    active = [k for k in st.session_state.get("emergency", {}) if k[0] == user["id"]]
-    if active:
-        chips.append(chip(f"Acceso de emergencia activo ({len(active)})", "danger", "🚨"))
-st.markdown(f'<div class="ctx-chips">{"".join(chips)}</div>', unsafe_allow_html=True)
+active = [k for k in st.session_state.get("emergency", {}) if k[0] == user["id"]]
+if active:
+    st.markdown(chip(f"Acceso de emergencia activo ({len(active)})", "danger"), unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Navegación por permisos
 # ---------------------------------------------------------------------------
 P = ctx.permissions()
 CATALOG = [  # grupo del menú, slug, título, icono, página, permisos que la habilitan (basta uno)
-    ("Operación", "hoy", "Hoy", "🏠", ph.page_hoy, {"tablero.gerencial.ver", "camas.ver", "portal.propio"}),
-    ("Operación", "camas", "Mapa de camas", "🛏️", pm.page_camas, {"camas.ver"}),
-    ("Operación", "alertas", "Alertas y acciones", "🚨", pa.page_alertas, {"farmacia.alertas.ver"}),
-    ("Clínico", "clinico", "Clínico y farmacia", "🩺", pc.page_clinico,
+    ("Operación", "hoy", "Hoy", ":material/home:", ph.page_hoy, {"tablero.gerencial.ver", "camas.ver", "portal.propio"}),
+    ("Operación", "camas", "Mapa de camas", ":material/bed:", pm.page_camas, {"camas.ver"}),
+    ("Operación", "alertas", "Alertas y acciones", ":material/notification_important:", pa.page_alertas, {"farmacia.alertas.ver"}),
+    ("Operación", "inventario", "Inventario", ":material/inventory_2:", pi.page_inventario, {"inventario.auditar"}),
+    ("Clínico", "clinico", "Clínico y farmacia", ":material/stethoscope:", pc.page_clinico,
      {"hc.ver_notas", "hc.ver_completa", "prescripcion.crear", "dispensacion.registrar"}),
-    ("Clínico", "portal", "Mis fórmulas y citas", "🧑", pc.page_portal, {"portal.propio"}),
-    ("Gestión", "tablero", "Indicadores", "📊", pa.page_tablero, {"tablero.gerencial.ver", "camas.ver"}),
-    ("Gestión", "predicciones", "Pronósticos", "📈", pp.page_predicciones, {"tablero.gerencial.ver"}),
-    ("Gestión", "asistente", "Asistente IA", "🤖", pa.page_asistente, {"agente.consultar"}),
-    ("Gestión", "datos", "Datos y auditoría", "🗂️", pa.page_datos, {"auditoria.ver"}),
+    ("Clínico", "portal", "Mis fórmulas y citas", ":material/person:", pc.page_portal, {"portal.propio"}),
+    ("Gestión", "tablero", "Indicadores", ":material/bar_chart:", pa.page_tablero, {"tablero.gerencial.ver", "camas.ver"}),
+    ("Gestión", "predicciones", "Pronósticos", ":material/trending_up:", pp.page_predicciones, {"tablero.gerencial.ver"}),
+    ("Gestión", "asistente", "Asistente IA", ":material/forum:", pa.page_asistente, {"agente.consultar"}),
+    ("Gestión", "datos", "Datos y auditoría", ":material/folder_managed:", pa.page_datos, {"auditoria.ver"}),
 ]
 sections: dict[str, list] = {}
 ctx.PAGES.clear()
@@ -118,6 +116,7 @@ if not sections:
 flat = [page for group in sections.values() for page in group]
 menu = flat if ctx.current_user()["rol"] == "PACIENTE" else sections
 page = st.navigation(menu, position="sidebar")
+ss.user_card()             # foto, nombre, rol, turno y cerrar sesión (abajo en la barra lateral)
 nt.render_bell(bell_col)  # la campana se dibuja cuando ya existen los enlaces a las páginas del rol
 page.run()
 cb.render(page.url_path)  # asistente IA flotante (abajo a la derecha), según permisos
