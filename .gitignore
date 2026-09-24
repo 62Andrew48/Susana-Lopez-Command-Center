@@ -1,0 +1,11 @@
+# Credenciales
+.env
+# Base generada (se reconstruye con database.py)
+hospital.db
+clinico.db*
+*.db-journal
+# Datos del hospital: NO se publican en el repositorio
+Datos/*.txt
+__pycache__/
+.pytest_cache/
+.venv/
