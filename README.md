@@ -10,41 +10,203 @@ Directivos y jefes de servicio dependen de reportes manuales de TI, y las decisi
 
 ## La solución
 
-Un MVP que unifica el extracto del HIS en una base SQLite y ofrece tres herramientas:
+Un centro de mando que unifica el extracto del HIS en una base analítica SQLite (`hospital.db`, solo lectura) y
+conecta la operación diaria en una base clínica transaccional (`clinico.db`). Tiene tres ejes:
 
-1. **Asistente IA (NL2SQL):** preguntas en español → SQL de solo lectura → respuesta, tabla, gráfico y SQL visible.
-   Si el LLM falla o no hay API key, un **Plan B** con SQL validado responde las preguntas clave.
-2. **Tablero de KPIs:** ocupación por unidad, espera por triage, causa raíz por turno, diagnósticos,
-   rotación de medicamentos, cumplimiento quirúrgico, especialidades y perfil de pacientes.
-3. **Alertas y acciones:** sobreocupación con camas a habilitar y personal a reasignar, stock crítico con
-   orden de compra, picos de demanda por patología, metas de triage y balance de quirófanos.
+1. **Asistente IA (NL2SQL), escrito o por voz:** preguntas en español → SQL de solo lectura → respuesta, tabla,
+   gráfico y SQL visible. Si el LLM falla o no hay API key, un **Plan B** con SQL validado responde las preguntas
+   clave. También responde sobre archivos adjuntos (CSV, Excel, PDF, TXT, imagen) y deriva los pronósticos a los
+   microservicios.
+2. **Indicadores, alertas y pronósticos:** ocupación por unidad, espera por triage con causa raíz, diagnósticos,
+   rotación de medicamentos, cumplimiento quirúrgico; alertas con la acción que las resuelve (camas a habilitar,
+   personal a reasignar, orden de compra en Excel); 4 microservicios predictivos e informe gerencial en PDF y Excel.
+3. **Operación por rol (RBAC):** pacientes e historia clínica con versiones, prescripción y farmacia, mapa de camas,
+   citas y turnos de atención, solicitudes de cita con mensajes y WhatsApp, personal y quirófanos. Seis roles:
+   gerencia (Admin), médico, enfermería, facturación/admisiones, coordinación de quirófanos y paciente.
+
+### Menú por rol
+
+Cada rol ve solo las páginas que sus permisos habilitan (`CATALOG` en `app.py`):
+
+| Grupo | Páginas |
+|---|---|
+| Operación | Hoy · Mapa de camas · Alertas y acciones · Inventario |
+| Quirófanos | Programación quirúrgica (página de inicio de coordinación de quirófanos) |
+| Clínico | Clínico y farmacia · Citas y turnos · Mis fórmulas y citas (paciente) |
+| Gestión | Indicadores · Pronósticos · Asistente IA · Personal y turnos · Datos y auditoría |
+
+En la cabecera: la tuerca de **ajustes** (modo oscuro, cambiar contraseña), la **campana** de notificaciones y el
+**reloj clínico** de la demostración. El **asistente flotante** está en todas las páginas.
 
 ---
 
-## Ejecución en 2 pasos
+## Ejecución desde cero
+
+Requisitos: Python 3.10+ y los 7 archivos `.txt` del reto (no se versionan: son datos del hospital).
 
 ```bash
-# 0. (una vez) copia los 7 archivos .txt del reto en ./Datos/
-# 1. Instalar dependencias (Python 3.10+)
+git clone https://github.com/62Andrew48/Susana-Lopez-Command-Center.git
+cd Susana-Lopez-Command-Center
+python -m venv .venv
+source .venv/Scripts/activate      # Windows (Git Bash). En Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
-
-# 2. Ejecutar (la base hospital.db se construye sola en el primer arranque, ~20 s)
-streamlit run app.py
+# copiar Paciente.txt, Ingresos.txt, Atencion.txt, Triage.txt, Servicios.txt,
+# MedicamentoInsumo.txt y ProgramacionCirugia.txt en ./Datos/
+streamlit run app.py               # abre http://localhost:8501; hospital.db se construye sola (~20 s)
 ```
+
+Si faltan archivos en `Datos/`, la app lo dice en pantalla y no arranca a medias.
 
 Opcional:
 
 ```bash
-cp .env.example .env              # y configura LLM_PROVIDER + API key para activar el LLM
-python database.py --rebuild      # reconstruir la base manualmente
+cp .env.example .env              # LLM_PROVIDER (gemini | openai | anthropic | ollama | none) + API key, SMTP, WhatsApp
+python database.py --rebuild      # reconstruir la base analítica manualmente
 uvicorn api:app --port 8000       # API REST -> http://localhost:8000/docs
 python agent.py                   # demo por consola de las 4 preguntas
-python -m pytest -q               # 65 pruebas (seguridad, intenciones, LLM simulado, ciclo clínico, RBAC)
+python -m pytest -q               # 219 pruebas
 ```
 
-Sin `.env` todo funciona en modo **Plan B** (sin red y sin costo).
+Sin `.env` todo funciona en modo **Plan B** (sin red y sin costo); sin SMTP los códigos de recuperación y de
+registro se muestran en pantalla. Gemini tiene capa gratuita (`LLM_PROVIDER=gemini`).
+
+**Al actualizar desde una versión anterior:**
+
+- `clinico.db` se versiona (`PRAGMA user_version`, hoy **11**). Si la base local es de otra versión, al arrancar
+  se guarda como `clinico_respaldo_vN.db` y se recrea con el escenario de demostración.
+- `hospital.db` **no** se detecta sola: si el ETL cambió (por ejemplo, la columna `camas_expansion_ocupadas` de
+  `ocupacion_diaria`), ejecutar `python database.py --rebuild`. Con una base vieja fallan las pruebas de ocupación.
+- Volver a correr `pip install -r requirements.txt`: la rama agregó `openpyxl`, `reportlab`, `pypdf`,
+  `SpeechRecognition` y `Authlib` (sin ellos fallan los PDF, los adjuntos, la voz y el ingreso con Google).
+
+**Pruebas (219)** por archivo: agente y SQLGuard (`test_agent`), archivos en el asistente (`test_archivos`), citas
+y turnos (`test_atencion`), autenticación (`test_auth`), ciclo clínico y farmacia (`test_clinico`), cuentas de
+paciente (`test_cuentas`), historia clínica y camas (`test_historias`), microservicios (`test_ml_services`),
+operación, notificaciones y alcance del asistente (`test_operacion`), quirófanos (`test_quirofanos`), solicitudes
+de cita y de registro (`test_solicitudes`) y voz (`test_voice`).
 
 ---
+
+## Versión 4: pacientes, historia clínica, citas, personal y quirófanos
+
+| Módulo | Admin | Médico | Enfermería | Facturación | Quirófanos | Paciente |
+|---|---|---|---|---|---|---|
+| Pacientes (registrar, editar, inactivar; correo para el portal) | ✓ | ✓ | | ✓ | | |
+| Ficha del paciente (alergias, antecedentes, cama, fórmulas, citas) | lectura | ✓ edita | lectura | | | la suya |
+| Registros de historia clínica y adjuntos (crear, corregir con versión, anular) | lectura | ✓ | lectura | | | la suya |
+| Buscar historias, descargar PDF, exportar e importar (JSON) | ✓ | ✓ | busca | | | busca en la suya y descarga |
+| Alerta de alergia al formular (penicilinas, AINE, sulfas…) | | ✓ | | | | |
+| Medicamento sin existencias: en espera, fecha de llegada, se aparta al llegar (30 días) | pedidos | formula | entrega | | | ve la fecha |
+| Ocupar / liberar camas con estancia estimada | ✓ | ✓ | ✓ | | ocupa para sus pacientes quirúrgicos | |
+| Citas (cupos según el turno del médico, sin doble agenda) | | su agenda | | ✓ | | ve y cancela |
+| Solicitud de cita contando los síntomas (portal o asistente) → facturación agenda y avisa por WhatsApp | | | | ✓ atiende | | ✓ pide |
+| Mensajes con facturación dentro de la solicitud (con aviso de no leídos en la campana) | | | | ✓ responde | | ✓ escribe |
+| Historial de citas con colores (verde atendida, rojo no asistió, sin color pendiente) | | | | | | ✓ |
+| Turnos de atención (C-007, prioridad Ley 1171 de 2007, pantalla sin nombres) | | llama | | ✓ | | ve cuántos hay antes |
+| Usuarios (crear con clave temporal, suspender, restablecer) y turnos del personal | ✓ | | | | | |
+| Quirófanos: capacidad probada por área, lista de espera (HIS + solicitudes), programación sugerida con hora | propone el calendario | solicita y quita las suyas en espera | | | acepta o rechaza | |
+| Quirófanos: agendar día y hora, cancelar con causa, reprogramar, marcar realizada (desde el día de la cirugía) | | | | | ✓ | |
+| Aviso de cirugía urgente con su hora | ✓ | la de sus pacientes | | | ✓ | |
+| Solicitudes de registro de personas nuevas (citarlas al hospital o rechazar) | ✓ | | | | | pide sin cuenta |
+| Cobertura de personal ahora y sugerencia de reasignación · causa raíz de la espera | ✓ | | | | | |
+| Asistente por voz (micrófono del chat) y respuesta leída en voz alta | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Asistente: adjuntar CSV, Excel, PDF, TXT o imagen y preguntar sobre el archivo | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Eliminar cuentas sin historial (las que tienen historial se inactivan) | ✓ | | | | | |
+| Ingresar con Google · recuperar contraseña · modo oscuro | todos | todos | todos | todos | todos | todos |
+| Crear su propia cuenta (documento + código al correo registrado en admisiones) | | | | | | ✓ |
+
+Cuentas de prueba (contraseña `demo`): `admin`, `dra.ruiz`, `dr.paredes`, `enf.gomez`, `enf.castro`,
+`facturacion.alejandro` (facturación y admisiones: citas y turnos de atención), `quirofanos.bravo` (coordinación de
+quirófanos), `paciente.laura`, `paciente.110`. Para probar el autorregistro: "Soy paciente: crear mi cuenta" con
+documento `1061800222` y correo `maria.ortiz@correo.demo` (sin SMTP el código aparece en pantalla). Los cinco pacientes con nombre (Laura, Carlos, María,
+Juan José y Rosa) son **casos sintéticos** de demostración; los pacientes del extracto llegan anonimizados.
+
+Seguridad añadida: contraseñas nuevas con PBKDF2-SHA256 y sal; política de 8 caracteres con letras y números;
+cambio obligatorio de la clave temporal; códigos de recuperación guardados como huella; la historia clínica,
+las versiones, los adjuntos y los movimientos de camas no se borran (Res. 1995 de 1999); cada búsqueda, descarga,
+exportación e importación queda en la bitácora.
+
+**Reglas de quirófanos** (`surgery_planner.py`): solo coordinación agenda, cancela programadas, reprograma y marca
+realizadas; no se agenda en el pasado ni a más de 90 días, ni dos cirugías del mismo paciente el mismo día; una urgente
+a más de 24 h o un día sin cupos exige justificación (15+ caracteres) que queda guardada; cancelar exige causa y, si es
+para hoy/mañana o la causa es "Otro", detalle. Nada se borra: queda cancelada con quién, cuándo y por qué.
+
+**Citas pedidas por el paciente**: el paciente ya no elige médico ni hora; cuenta qué le pasa, qué necesita y en qué
+jornada puede ir (desde "Mis citas" o escribiéndole al asistente: "quiero una cita, tengo tos y fiebre"). La solicitud
+le llega a facturación con aviso en la campana; facturación la agenda con los cupos reales (a los menores les sugiere
+pediatría) y abre WhatsApp con el mensaje ya armado (enlace `wa.me`, sin costo ni API). Si lo que cuenta suena a
+urgencia (dolor en el pecho, falta de aire…), se le indica ir a urgencias o llamar al 123. Con `HOSPITAL_WHATSAPP` en
+`.env` el portal muestra además el botón para escribirle a facturación.
+
+**Mensajes paciente ↔ facturación** (`requests_service.py`, tabla `solicitudes_cita_mensajes`): cada solicitud
+abierta tiene su conversación. El paciente solo escribe en las suyas; facturación valora lo que cuenta, le asigna el
+profesional adecuado y responde. La primera respuesta de facturación marca la solicitud como contactada. Los mensajes
+sin leer aparecen en la campana ("mensaje nuevo de pacientes" / "Facturación te escribió") y se marcan leídos al abrir
+la conversación. Una solicitud retirada ya no admite mensajes, y los mensajes no se borran (trigger en el esquema).
+
+**Personas que no están registradas**: desde el inicio de sesión dejan sus datos; gerencia las cita (día, hora y lugar)
+para ir con su documento, con WhatsApp y correo si hay SMTP; la persona consulta la respuesta con documento + correo.
+
+**Horas de cirugía**: el HIS no trae horas, así que la hora es una sugerencia que el coordinador puede cambiar: la
+jornada quirúrgica de referencia (07:00-19:00, `JORNADA` en `surgery_planner.py`) repartida según la capacidad probada
+del área ese día. Dos cirugías de la misma área no quedan a la misma hora y no se agenda una hora que ya pasó.
+
+**Ingreso con Google** (opcional): copiar `.streamlit/secrets.toml.example` como `.streamlit/secrets.toml` y poner el
+ID y secreto de un cliente OAuth de Google Cloud (el archivo explica los pasos). Solo entra quien tenga ese correo en
+su cuenta del hospital; tener cuenta de Google no da acceso. Sin ese archivo el botón no aparece.
+
+**Cuenta del paciente**: admisiones registra el correo en los datos del paciente; el paciente escribe su documento y
+ese correo, recibe un código de 6 dígitos (15 min, un uso, 3 por hora) y crea su contraseña. El código llega al correo
+registrado, así nadie abre la cuenta de otro con solo saber su documento.
+
+**Archivos en el asistente**: CSV/Excel se resumen con cifras verificables (filas, columnas, vacíos, mínimo, promedio,
+máximo); las columnas que identifican pacientes (nombre, documento, contacto, diagnóstico) se ocultan antes de mostrar
+o enviar nada a la IA. PDF/TXT: con IA responde la pregunta; sin IA muestra el comienzo. Imágenes: solo con Gemini.
+Los archivos no se guardan.
+
+## Versión 3: una pantalla por pregunta
+
+La interfaz se reorganizó para que cada rol vea primero lo que tiene que hacer, no el histórico:
+
+- **Hoy** (inicio): cuatro cifras del día, **"Qué hacer ahora"** con el botón que lo resuelve y la **cola de
+  urgencias** a la hora del reloj clínico (códigos `URG-xxxx` no reversibles, sin nombres). El paciente ve sus
+  medicamentos por reclamar y su próxima cita.
+- **Mapa de camas** por piso, habitación y cama. El piso y la habitación salen del código del HIS
+  (`H-203C` = piso 2, habitación 203, cama C). Buscador de un clic: *¿dónde hay cama libre para un adulto, un niño,
+  un recién nacido, maternidad o UCI?* Las camas virtuales se muestran como **capacidad de expansión**.
+- **Campana de notificaciones** por rol, con enlace a donde se resuelve cada aviso.
+- **Inicio de sesión** con usuario y contraseña, tarjeta del usuario (iniciales, rol, turno) y cierre de sesión.
+- **Inventario de farmacia** (gerencia): existencias, llegada de pedidos (incluida la orden completa de urgentes),
+  conteo físico con ajuste y motivo, y el historial de movimientos. El stock nunca se edita: todo es un movimiento
+  del libro mayor, y las alertas de farmacia se recalculan al instante.
+- **Asistente flotante** en todas las páginas, con alcance por permisos:
+
+| Rol | Qué puede preguntar |
+|---|---|
+| Admin y Médico | Toda la base analítica anonimizada (LLM o Plan B), ubicación de camas, glosario; ve el SQL |
+| Enfermería | Camas, inventario, rotación, espera en urgencias, alertas y glosario. Sin SQL libre ni LLM |
+| Paciente | Solo sus fórmulas y citas, y el glosario. Nunca consulta la base del hospital |
+
+- **Glosario del sector salud** (tomado del glosario entregado con el reto): al pasar el cursor por un término y
+  en el chat ("¿qué es triage II?").
+
+## Microservicios predictivos (solo gerencia)
+
+Cuatro servicios Flask independientes en `microservicios/` (urgencias, quirófanos, farmacia y consulta
+externa), cada uno con un Random Forest validado con partición temporal contra una línea base ingenua
+(detalle en `microservicios/README.md`). La app los consume con `ml_services.py`:
+
+- **Página "Pronósticos"** (Admin): una tarjeta por servicio con la predicción, su rango probable, si mejora o
+  no a la línea base y el reporte Excel.
+- **Asistente:** una pregunta de pronóstico ("¿cuántos ingresos a urgencias se esperan mañana?") va al
+  microservicio del dominio.
+- **Fiabilidad:** tiempo máximo de 2 s por llamada y circuit breaker de 30 s. Si un servicio cae, su tarjeta
+  dice "no disponible", las demás siguen y el asistente responde con el histórico avisando el motivo.
+
+```bash
+for s in microservicios/service_*/; do pip install -r "$s/requirements.txt"; done
+python microservicios/run_services.py      # en otra terminal; la app funciona también sin ellos
+```
 
 ## Versión 2: módulo clínico con roles (RBAC)
 
@@ -54,29 +216,42 @@ muestra a cada rol solo sus secciones:
 
 | Sección | Admin | Doctor | Enfermería | Paciente |
 |---|:-:|:-:|:-:|:-:|
-| Tablero (KPIs directivos, camas, urgencias, epidemiología) | ✓ completo | camas y urgencias | camas y urgencias | |
-| Asistente IA (NL2SQL) | ✓ | ✓ | | |
+| Hoy (acciones del turno y cola de urgencias) | ✓ | ✓ | ✓ | ✓ (sus pendientes) |
+| Mapa de camas | ✓ | ✓ | ✓ | |
+| Indicadores (KPIs, tendencias, camas, urgencias, epidemiología) | ✓ completo | camas y urgencias | camas y urgencias | |
+| Asistente IA (página completa con SQL) | ✓ | ✓ | | |
+| Asistente flotante | ✓ | ✓ | limitado | solo sus datos |
 | Alertas y acciones (semáforo, orden de compra, acciones) | ✓ + CSV | ✓ | ✓ | |
-| Clínico y farmacia (historias, prescripción, dispensación) | | ✓ | ✓ (sin prescribir) | |
-| Mi portal (fórmulas y citas propias) | | | | ✓ |
+| Pacientes (registrar, editar, inactivar) | ✓ | ✓ | | |
+| Buscar historias clínicas | ✓ (solo índice, sin contenido) | ✓ (con contenido) | | |
+| Historia clínica: registros y adjuntos (crear, corregir, anular) | | ✓ | lectura | la suya (lectura) |
+| Prescripción y entregas (apartado de 30 días) | | ✓ | ✓ (sin prescribir) | |
+| Mis fórmulas y citas | | | | ✓ |
 | Datos y auditoría (extractos, bitácora) | ✓ | | | |
 
-`clinico.db` se crea y se siembra sola en el primer arranque: 4 usuarios de demostración, turnos diurnos y
-6 historias clínicas sobre pacientes e ingresos **reales** del extracto. Las fórmulas y las citas son **sintéticas**.
-El menú "🕒 Reloj de demo" cambia a turno nocturno o reinicia el escenario sin tocar la base analítica.
+`clinico.db` se crea y se siembra sola en el primer arranque: los usuarios de demostración (ver las cuentas de prueba de la versión 4), turnos diurnos y
+6 historias clínicas sobre pacientes e ingresos del extracto (que llegan anonimizados, sin nombre). Las fórmulas y las citas son **sintéticas**.
+El reloj de la cabecera (🕒) cambia a turno nocturno o reinicia el escenario sin tocar la base analítica.
 
-### Guion de demostración (≈4 minutos)
+### Guion de demostración (≈4 min 30 s)
 
-1. **Admin** → Tablero: 5 KPIs y 3 alertas críticas. En Alertas, el semáforo y la orden de compra en CSV.
-2. **Dra. Ruiz** → Clínico y farmacia: la historia del paciente 110 con su línea de tiempo inmutable.
-3. **Enf. Gómez** → Dispensación → **"Simular avance de 72 horas"**: 15 dosis de acetaminofén y 10 de enoxaparina
-   vuelven a stock. La enoxaparina, de continuidad crítica, genera una alerta en lugar de un bloqueo.
-4. **Paciente 110** → Mi portal: la fórmula aparece caducada → "Solicitar cita".
-5. **Dra. Ruiz** → Prescripción: "Atender cita" levanta el bloqueo.
-6. Reloj → **Turno de noche** → Historias: el acceso queda bloqueado → "Romper el vidrio" con justificación.
-7. **Admin** → Datos y auditoría → Bitácora: el acceso de emergencia aparece registrado.
+Antes de cada ensayo: reloj → "Reiniciar escenario clínico" y levantar los microservicios.
 
-Antes de cada ensayo usa "↺ Reiniciar escenario clínico".
+1. **Admin → Hoy (20 s):** 86,3 % de camas físicas, "Hospitalización 2 al 100 %" con la cama libre más cercana.
+2. **Asistente IA (1 min 15 s):** las 4 preguntas del reto con los botones; una de ellas **por voz** (micrófono
+   del chat) y "Escuchar" la respuesta. Abrir "Trazabilidad" para mostrar el SQL. Escribir `borra la tabla de
+   ingresos` para mostrar el bloqueo.
+3. **Indicadores → Urgencias y espera (20 s):** "¿Por qué cambió la espera?" (causa raíz por turno y triage).
+   **Personal y turnos → Cobertura ahora (15 s):** la sugerencia de a quién mover.
+4. **Quirófanos (40 s):** cumplimiento 97 %, lista de espera de 41 (40 del HIS sin ejecutar + 1 urgencia),
+   gráfico de carga vs. capacidad probada → "Confirmar la programación". La urgencia queda para mañana.
+5. **Dra. Ruiz → Clínico y farmacia (40 s):** buscar "Laura" → ficha con **alergia a penicilina** → Prescripción:
+   amoxicilina → alerta roja de alergia. Descargar la historia en PDF.
+6. **Paciente Laura (30 s):** claritromicina "en espera de existencias, llega el 24 de septiembre".
+   **Admin → Inventario → Llegada de pedido:** registrar la claritromicina → queda apartada 30 días para ella.
+7. **Facturación · Alejandro (30 s):** Citas del día → Carlos ya tiene turno C-001 → **Dra. Ruiz → Mi agenda →
+   Llamar al siguiente**.
+8. **Reloj → Turno de noche (20 s):** la historia queda bloqueada → "Romper el vidrio" → aparece en la bitácora.
 
 ## Arquitectura
 
@@ -96,9 +271,12 @@ flowchart LR
         SG --> EX[Ejecutor solo-lectura<br/>+ authorizer]
         EX --> RE[Motor de recomendaciones]
     end
-    UI["app.py · Streamlit (Vista)<br/>Tablero · Chat · Alertas"]
+    UI["app.py + ui/ · Streamlit (Vista)<br/>páginas por rol · asistente flotante"]
     API["api.py · FastAPI<br/>/api/query · /api/kpis · /api/alerts"]
-    LLM[[OpenAI · Anthropic · Ollama/SQLCoder]]
+    LLM[[Gemini · OpenAI · Anthropic · Ollama/SQLCoder]]
+    CLIN[(clinico.db<br/>transaccional, RBAC, bitácora)]
+    SRV["Servicios de dominio<br/>clinical_records · pharmacy_service · scheduling<br/>requests_service · surgery_planner · staff · beds_service"]
+    ML["microservicios/ (Flask)<br/>urgencias · quirófanos · farmacia · consultas"]
 
     Fuente --> ETL --> DB
     DB --> EX
@@ -106,6 +284,8 @@ flowchart LR
     UI --> Agente
     API --> Agente
     UI --> DB
+    UI --> SRV --> CLIN
+    UI -->|ml_services.py<br/>2 s + circuit breaker| ML
 ```
 
 **Secuencia de una pregunta**
@@ -136,11 +316,108 @@ sequenceDiagram
 | `config.py` | — | Variables de `.env`, rutas y umbrales de negocio |
 | `database.py` | Modelo | ETL, 12 tablas indexadas, funciones de KPI reutilizables |
 | `agent.py` | Controlador | NL2SQL, `SQLGuard`, ejecutor seguro, Plan B, `RecommendationEngine`, Factory de LLM |
-| `app.py` + `ui/` | Vista | Cabecera contextual, navegación por rol y páginas (analíticas y clínicas) |
-| `pharmacy_service.py` | Servicio | Ciclo de prescripción, caducidad con retorno a stock y autorización RBAC |
-| `demo_seed.py` | — | Escenario de demostración y reloj clínico |
+| `app.py` + `ui/` | Vista | Cabecera (ajustes, campana, reloj), menú por permisos y una página por módulo: `pages_hoy`, `pages_camas`, `pages_analytics`, `pages_inventario`, `pages_quirofanos`, `pages_clinical`, `pages_hc`, `pages_atencion`, `pages_predicciones`, `pages_personal` |
+| `ui/session.py` · `ui/context.py` · `ui/theme.py` | Vista | Inicio de sesión (usuario, Google, autorregistro, recuperación), estado de la sesión con `authorize()` auditado, tema claro/oscuro |
+| `ui/chat_bubble.py` · `ui/assistant_scope.py` | Controlador | Asistente flotante y qué puede responder según los permisos del rol |
+| `ui/notifications.py` | Servicio | Notificaciones por rol (lógica pura, probada) |
+| `ui/glossary.py` | — | Términos del sector salud en lenguaje sencillo |
+| `pharmacy_service.py` | Servicio | Inicialización y versión de `clinico.db`, prescripción, caducidad con retorno a stock, semáforo de inventario y autorización RBAC |
+| `clinical_records.py` · `hc_documents.py` | Servicio | Pacientes, registros de historia clínica con versiones y anulación, adjuntos; PDF y exportación/importación JSON |
+| `beds_service.py` | Servicio | Ocupar y liberar camas encima del censo del extracto |
+| `scheduling.py` | Servicio | Agenda de citas según el turno del médico y turnos de atención con prioridad |
+| `requests_service.py` | Servicio | Solicitudes de cita por síntomas, mensajes paciente ↔ facturación, WhatsApp y solicitudes de registro |
+| `surgery_planner.py` | Servicio | Capacidad por área, lista de espera, programación sugerida con hora y reglas de quirófanos |
+| `staff.py` | Servicio | Usuarios del personal y sus turnos de trabajo |
+| `auth.py` · `mailer.py` | Servicio | Sesión con bloqueo por intentos, PBKDF2, códigos de recuperación y de registro; envío por SMTP |
+| `ml_services.py` · `forecast_text.py` | Servicio | Cliente de los microservicios (tiempo máximo y circuit breaker) y traducción de sus salidas a lenguaje de gestión |
+| `reports.py` | Servicio | Excel para gerencia e informe ejecutivo en PDF |
+| `file_assistant.py` · `voice.py` | Servicio | Preguntas sobre archivos adjuntos (ocultando datos de pacientes) y voz del asistente |
+| `demo_seed.py` · `demo_cases.py` | — | Escenario de demostración, reloj clínico y casos clínicos sintéticos |
 | `api.py` | Servicio | Endpoints REST del reto |
-| `tests/` | — | Pruebas de seguridad, intenciones y flujo LLM |
+| `sql/schema_clinico.sql` | Modelo | Esquema de `clinico.db`: 31 tablas, permisos por rol y triggers que impiden borrar historia, versiones, movimientos, solicitudes y mensajes |
+| `tests/` | — | 219 pruebas (detalle en "Ejecución desde cero") |
+
+### Flujos principales
+
+**Autorización de cada acción sobre datos clínicos** (`pharmacy_service.authorize`, llamada desde `ui/context.py`)
+
+```mermaid
+flowchart TD
+    A[Acción del usuario] --> B{¿Cuenta ACTIVA?}
+    B -- No --> X[Denegado]
+    B -- Sí --> C{¿El rol tiene el permiso?}
+    C -- No --> X
+    C -- Sí --> D{¿Es paciente y pide datos de otro?}
+    D -- Sí --> X
+    D -- No --> E{¿Permiso clínico y rol médico o enfermería?}
+    E -- No --> OK[Permitido]
+    E -- Sí --> F{¿Está en turno?}
+    F -- Sí --> OK
+    F -- No --> G{¿Romper el vidrio con justificación?}
+    G -- Sí --> EM[Permitido como emergencia]
+    G -- No --> X
+    X & OK & EM --> AU[(auditoria_accesos)]
+```
+
+Queda en la bitácora toda decisión sobre un paciente y todo acceso denegado.
+
+**Ciclo de una fórmula** (triggers de `sql/schema_clinico.sql`; el stock es un libro mayor de movimientos)
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDIENTE_STOCK: se formula sin existencias
+    [*] --> VIGENTE: se formula con existencias (unidades apartadas)
+    PENDIENTE_STOCK --> VIGENTE: llega el pedido y se aparta (30 días desde ahí)
+    VIGENTE --> PARCIAL: entrega parcial
+    VIGENTE --> ENTREGADA: entrega completa
+    PARCIAL --> ENTREGADA: se completan las dosis
+    VIGENTE --> CADUCADA: vence el plazo para reclamar
+    PARCIAL --> CADUCADA: vence el plazo para reclamar
+    VIGENTE --> ANULADA
+    PARCIAL --> ANULADA
+    CADUCADA --> [*]: lo apartado vuelve a disponible y el paciente pide reevaluación
+    ENTREGADA --> [*]
+    ANULADA --> [*]
+```
+
+**Solicitud de cita por síntomas** (`requests_service.py`, `ui/pages_atencion.py`)
+
+```mermaid
+sequenceDiagram
+    actor P as Paciente
+    participant APP as Portal o asistente
+    participant RQ as requests_service
+    participant NT as Campana
+    actor F as Facturación
+    P->>APP: "quiero una cita, tengo tos y fiebre"
+    APP->>RQ: crear solicitud (síntomas, tipo, jornada)
+    Note over RQ: Si suena a urgencia: ir a urgencias o llamar al 123
+    RQ-->>NT: solicitud nueva
+    NT-->>F: aviso
+    F->>RQ: mensaje en la conversación (marca "contactado")
+    RQ-->>NT: "Facturación te escribió"
+    P->>RQ: responde en la misma solicitud
+    F->>RQ: agendar con cupos reales del médico
+    RQ-->>F: cita creada · solicitud AGENDADA
+    F->>P: WhatsApp con el mensaje ya armado (wa.me)
+```
+
+**Quirófanos: de la lista de espera a la cirugía realizada** (`surgery_planner.py`, `ui/pages_quirofanos.py`)
+
+```mermaid
+flowchart LR
+    HIS[Programaciones del HIS<br/>sin ejecutar] --> LE[Lista de espera<br/>EN_ESPERA]
+    MED[Médico solicita] --> LE
+    LE --> PL[Programación sugerida<br/>capacidad probada por área + hora]
+    PL --> GE[Gerencia propone<br/>el calendario]
+    GE --> CO{Coordinación<br/>de quirófanos}
+    CO -- rechaza con motivo --> GE
+    CO -- acepta o agenda --> PR[PROGRAMADA<br/>día y hora]
+    PR -- reprogramar --> PR
+    PR -- desde el día de la cirugía --> RE[REALIZADA]
+    PR -- cancelar con causa --> CA[CANCELADA]
+    LE -- cancelar con causa --> CA
+```
 
 ## Modelo de datos (`hospital.db`)
 
@@ -153,9 +430,49 @@ sequenceDiagram
 | `servicios` | 582.357 | Procedimientos CUPS, área y especialidad |
 | `medicamentos_insumos` | 579.465 | Dispensación + tipo de ítem |
 | `inventario_farmacia` | 1.327 | Consumo 30 días, rotación, stock, días de inventario |
-| `ocupacion_diaria` | 2.736 | Censo diario por unidad: capacidad, ocupadas, % |
+| `ocupacion_diaria` | 2.736 | Censo diario por unidad sobre camas físicas + camas de expansión en uso |
 | `camas` | 712 | Catálogo de camas observadas (capacidad) |
 | `cirugias` | 6.156 | Programación consolidada y estado (realizada / sin evidencia) |
+| `programacion_cirugia` | 13.046 | Extracto `ProgramacionCirugia` tal cual (un registro por procedimiento programado) |
+| `metadatos` | 5 | Fecha de referencia, rango de fechas de los datos, stock simulado y fecha de construcción |
+
+## Modelo de datos (`clinico.db`)
+
+Base transaccional de la operación (31 tablas, esquema en `sql/schema_clinico.sql`, versión 11). Nada clínico se
+borra: los triggers lo impiden y los cambios quedan como versiones, anulaciones o movimientos. Núcleo del modelo:
+
+```mermaid
+erDiagram
+    roles ||--o{ rol_permisos : tiene
+    permisos ||--o{ rol_permisos : ""
+    roles ||--o{ usuarios : ""
+    usuarios ||--o{ turnos : trabaja
+    usuarios ||--o{ auditoria_accesos : genera
+    pacientes_clinicos ||--|| historias_clinicas : "una HC"
+    historias_clinicas ||--o{ historia_clinica_eventos : "solo se agregan"
+    historias_clinicas ||--o{ hc_registros : ""
+    hc_registros ||--o{ hc_registros_versiones : "versiones"
+    historias_clinicas ||--o{ hc_adjuntos : ""
+    historias_clinicas ||--o{ prescripciones : ""
+    productos_farmacia ||--o{ prescripciones : ""
+    prescripciones ||--o{ dispensaciones : ""
+    prescripciones ||--o{ administraciones_dosis : "enfermería"
+    productos_farmacia ||--o{ inventario_movimientos : "libro mayor"
+    productos_farmacia ||--o{ pedidos_compra : ""
+    pacientes_clinicos ||--o{ citas : ""
+    usuarios ||--o{ citas : "médico"
+    pacientes_clinicos ||--o{ solicitudes_cita : pide
+    solicitudes_cita ||--o{ solicitudes_cita_mensajes : "conversación"
+    solicitudes_cita |o--o| citas : "se agenda en"
+    pacientes_clinicos ||--o{ camas_asignaciones : ocupa
+    pacientes_clinicos ||--o{ cirugias_solicitudes : ""
+    cirugias_propuestas ||--o{ cirugias_propuesta_items : ""
+    cirugias_solicitudes ||--o{ cirugias_propuesta_items : ""
+```
+
+Otras tablas: `hc_ficha` y `hc_ficha_versiones` (alergias y antecedentes), `turnos_atencion` (fila con código
+C-xxx), `recuperacion_clave` y `registro_pacientes` (códigos guardados como huella) y `solicitudes_registro`
+(personas sin registro).
 
 ## Decisiones tomadas a partir de los datos
 
@@ -175,6 +492,20 @@ Estas decisiones salieron de perfilar el extracto antes de programar; conviene m
 - **No hay existencias de farmacia.** El consumo diario es real; el stock se simula de forma determinística y
   queda marcado (`stock_simulado = 1`). Si farmacia entrega `Datos/Inventario.txt` (`CodigoServicio|Stock`),
   el cálculo pasa a ser real sin tocar código.
+- **Camas físicas y virtuales.** El HIS registra 223 camas "virtuales" fuera de Urgencias: capacidad de
+  expansión que se habilita cuando las físicas no alcanzan. Toda la app (tablero, agente, alertas, API, mapa)
+  mide la ocupación sobre las **300 camas físicas** (86,3 % el 21/09) y reporta aparte los pacientes en camas
+  de expansión (108). Contar las virtuales como capacidad escondía saturación real: Hospitalización 3 aparecía
+  al 64,5 % estando al 93 %, y el cuidado básico neonatal al 63 % estando al 100 %.
+- **Ubicación física.** El código de cama trae piso y habitación en hospitalización y gineco-obstetricia
+  (`H-203C`, `G-108B`); las demás unidades solo traen unidad y número. Los datos no traen pasillo ni ala.
+- **Cola de urgencias.** Un paciente está "esperando" a la hora `t` si ingresó por urgencias antes de `t` y su
+  primera atención (`FechaAtencion`) es posterior a `t`. El extracto llega hasta el 21/09 a las 14:33.
+- **Triage:** 17.781 filas en el extracto, 16.106 con `OidTriage`; las 1.675 restantes no tienen identificador
+  (el diccionario de datos indica que acepta nulos), no son filas perdidas.
+- **Programación quirúrgica sin fecha.** Según el diccionario, `ProgramacionCirugia` solo trae consecutivo,
+  paciente, ingreso y código de servicio. La fecha y el quirófano se derivan de los servicios prestados en
+  áreas de QUIRÓFANOS del mismo ingreso.
 - **Cirugías:** solo 1.345 de 6.156 programaciones tienen su ingreso dentro del extracto; el cumplimiento se
   calcula sobre ellas (97 %).
 
@@ -186,7 +517,8 @@ Estas decisiones salieron de perfilar el extracto antes de programar; conviene m
   aunque el filtro fuera evadido + tiempo máximo por consulta.
 - **Privacidad:** en la ingesta se eliminan nombre, fecha de nacimiento y motivo de consulta; las respuestas
   descartan identificadores (`id_paciente`, `oid_ingreso`…). Un SQL malicioso del LLM se bloquea y se reporta.
-- **Credenciales:** solo en `.env` (ignorado por git, igual que los datos del hospital y `hospital.db`).
+- **Credenciales:** solo en `.env` y `.streamlit/secrets.toml` (ignorados por git, igual que los datos del hospital,
+  `hospital.db` y `clinico.db`).
 
 ## API
 
@@ -201,38 +533,41 @@ Estas decisiones salieron de perfilar el extracto antes de programar; conviene m
 
 ## Guía para el pitch (7 minutos)
 
-**1. Problema (45 s).** "Cada mañana un jefe de servicio pide a TI un reporte que llega tarde. Mientras tanto,
-hoy la hospitalización 2 está al 100 %." Mostrar la pestaña de alertas.
+**1. Problema (40 s).** "El hospital atiende ~500 pacientes al día con la información repartida entre HC, farmacia,
+admisiones y hojas de cálculo. El jefe de servicio pide un reporte a TI y llega tarde; mientras tanto, hoy
+Hospitalización 2 está al 100 %."
 
-**2. Solución (30 s).** Un asistente que responde en segundos con datos, gráfico y acción recomendada.
+**2. Solución (30 s).** Un centro de mando con un asistente de IA que responde en lenguaje natural (escrito o por
+voz) sobre el extracto del HIS del reto (más de 1,2 millones de registros, datos sintéticos), con tablero,
+alertas y la operación diaria conectada: camas, farmacia, historia clínica, citas, turnos y quirófanos.
 
-**3. Demo con las 4 preguntas (3 min).** Usar los botones del asistente y abrir el SQL de al menos una:
+**3. Demo (4 min 30 s).** Seguir el guion de arriba. Las 4 preguntas del reto van primero.
 
-| Pregunta | Respuesta con los datos del reto |
-|---|---|
-| ¿Cuántas camas de UCI están ocupadas hoy? | 30 de 46 (65,2 %); la UCI neonatal está al 83,3 % |
-| ¿Medicamentos con menos de 5 días de inventario? | 47 medicamentos (stock simulado, consumo real); el más crítico, cloruro de sodio 20 mEq, con 1 día |
-| ¿Espera promedio en urgencias la última semana? | 1 h 0 min en 796 atenciones; Triage 2 espera 46 min frente a la meta de 30 |
-| ¿Qué servicio tiene más pacientes este mes? | Urgencias, con 1.093 pacientes (44,4 %); le sigue Pediatría con 405 |
+**4. Valor añadido (45 s).**
+- Causa raíz de la espera y recomendación de reasignar personal (lo piden los puntos 7 y h del reto).
+- Quirófanos: programación de la lista de espera según la capacidad que cada área ya demostró operar.
+- Pronósticos por servicio con su nivel de confianza e informe gerencial en PDF.
+- Seguridad clínica real: alergias, medicamento apartado 30 días, historia que no se borra, bitácora.
 
-Cierre de la demo: cambiar el motor a "Solo reglas (Plan B)" y repetir una pregunta para mostrar que la demo
-no depende de internet. Luego escribir `DROP TABLE ingresos` (o "borra la tabla de ingresos") para mostrar el
-bloqueo de seguridad.
+**5. Arquitectura y tecnologías (30 s).** Streamlit → FastAPI → agente NL2SQL (Gemini/OpenAI/Claude/modelo local,
+con respaldo de consultas verificadas) → SQLite (analítica de solo lectura + base clínica transaccional) y 4
+microservicios predictivos.
 
-**4. Valor añadido (1 min).** Causa raíz (el turno de la tarde concentra la mayor espera, con 73 % de Triage 3),
-alerta temprana (respiratorio +18 % → revisar antibióticos), orden de compra descargable y balance de
-quirófanos (viernes 92 cirugías frente a 54 los lunes).
+**6. Limitaciones y mejoras (15 s).** Ver la sección siguiente.
 
-**5. Arquitectura y tecnologías (45 s).** Diagrama de este README. Streamlit (tablero y chat en Python puro),
-FastAPI (integración con el HIS), SQLite (cero instalación), LLM intercambiable por Factory.
-
-**6. Limitaciones y mejoras (45 s).** Ver la sección siguiente. Terminar con la mejora 1: modelo local.
+**Frases que aguantan preguntas:** "trabajamos sobre el extracto del reto, no conectados en vivo al HIS"; "los
+pacientes con nombre son casos sintéticos, el agente nunca devuelve datos identificables"; "lo que no sabemos
+(salas, horas de cirugía, dotación real) no lo inventamos: lo decimos".
 
 **Preguntas probables del jurado**
 
 - *¿Y si el LLM inventa un SQL peligroso?* Tres barreras: filtro, conexión de solo lectura y authorizer del motor.
-- *¿Por qué la ocupación histórica de UCI es baja?* Explicar el sesgo de "última cama" y la serie de días-cama.
-- *¿El stock es real?* No; está marcado como simulado y se reemplaza con un archivo de farmacia.
+- *¿Y si no hay internet o se cae la IA?* Responde el respaldo de consultas verificadas (Plan B), sin red.
+- *¿Cómo programan quirófanos si no hay salas ni horas?* Capacidad en cirugías/día por área (percentil 90 de lo
+  realizado); con salas y horarios, el mismo optimizador asigna por franja.
+- *¿El stock es real?* El consumo sí; las existencias iniciales son simuladas y así se marca en pantalla.
+- *¿Por qué SQLite?* Es la opción recomendada por el reto; el acceso a datos está aislado para migrar.
+- *¿Hay login?* Sí: roles, bloqueo por intentos, PBKDF2 con sal, recuperación con código y bitácora de todo.
 
 ## Limitaciones y mejoras futuras
 
@@ -241,18 +576,22 @@ FastAPI (integración con el HIS), SQLite (cero instalación), LLM intercambiabl
 | Dependencia de API externa y envío de preguntas fuera del hospital | **Modelo local** (Ollama + SQLCoder) ya soportado con `LLM_PROVIDER=ollama` |
 | Extracto histórico sin egresos ni traslados de cama | Integración en tiempo real con la Historia Clínica Electrónica (HL7 FHIR) |
 | Stock simulado | Conector al inventario de farmacia |
-| Alertas por reglas y umbrales | **Machine learning** (Prophet / gradient boosting) para pronosticar ingresos y consumo por patología |
-| Sin autenticación | Login con JWT y roles (directivo, jefe de servicio, farmacia) |
+| Pronósticos con Random Forest sobre el histórico del extracto | Reentrenamiento periódico y más variables (clima, epidemiología) al conectar datos en vivo |
+| Cuentas sembradas de la demo con sha256 sin sal (pasan a PBKDF2 al cambiar la clave) y sesión en memoria de Streamlit | argon2/bcrypt, JWT y proveedor de identidad institucional |
+| Horas de cirugía sugeridas (el HIS no trae salas ni horas) | Integrar el agendamiento real de salas y franjas |
+| WhatsApp por enlace `wa.me` (lo envía una persona) | API de WhatsApp Business para avisos automáticos |
+| `hospital.db` no detecta cambios del ETL | Versionar la base analítica igual que `clinico.db` |
 
 ## Tecnologías
 
-Python 3.10+, pandas, SQLite, Streamlit, Plotly, FastAPI, Uvicorn, Pydantic, Requests, python-dotenv, pytest.
-LLM opcional: OpenAI, Anthropic u Ollama.
+Python 3.10+, pandas, NumPy, SQLite, Streamlit, Plotly, FastAPI, Uvicorn, Pydantic, Requests, httpx,
+python-dotenv, openpyxl (Excel), reportlab (PDF), pypdf, SpeechRecognition (voz), Authlib (Google OAuth), pytest.
+Microservicios: Flask y scikit-learn. LLM opcional: Gemini, OpenAI, Anthropic u Ollama.
 
 ## Equipo
 
 | Integrante | Rol |
 |---|---|
-| Sebastián Moncayo Ordoñez | Datos, ETL, Agente IA y seguridad |
+| Sebastián Moncayo Ordoñez | Dirección del proyecto, datos, ETL, Agente IA, seguridad y experiencia por rol (Hoy, mapa de camas, notificaciones, asistente) |
 | Juan Camilo Perdomo Quira | Tablero y experiencia de usuario |
 | Andrés Felipe Garcés Campo | Documentación, pruebas y pitch |
