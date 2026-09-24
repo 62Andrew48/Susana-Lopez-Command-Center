@@ -153,7 +153,7 @@ def test_patient_sees_only_own_prescription_and_no_hospital_alerts(clin, conn):
 
 def test_expiry_flow_notifies_nurse_then_patient_and_doctor(clin, conn):
     import pharmacy_service as ps
-    later = "2026-09-24 10:00:00"
+    later = "2026-10-22 10:00:00"   # 30 días de apartado + 1 día
     nurse = _notes(clin, conn, 3, later)
     assert any("vencida" in n.title for n in nurse), "enfermería ve las fórmulas vencidas sin procesar"
     ps.expire_prescriptions(clin, later)

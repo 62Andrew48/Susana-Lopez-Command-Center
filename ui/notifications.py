@@ -160,9 +160,10 @@ def _patient(clin: sqlite3.Connection, id_paciente: int, now: str) -> list[Notif
         name = str(r["producto"]).capitalize()[:45]
         if r["estado"] in ("VIGENTE", "PARCIAL") and r["ambito"] == "AMBULATORIA":
             left = (_dt(r["fecha_limite_reclamo"]) - t).total_seconds() / 3600
-            if 0 <= left < 48:
-                out.append(Notification(f"pac_vence:{r['id']}", "alta" if left < 24 else "media",
-                                        "Reclama tu medicamento", f"{name} · tienes hasta el "
+            if left >= 0:  # apartado para el paciente hasta la fecha límite (30 días)
+                out.append(Notification(f"pac_vence:{r['id']}",
+                                        "alta" if left < 24 else "media" if left < 72 else "info",
+                                        "Reclama tu medicamento", f"{name} · está apartado para ti hasta el "
                                         f"{_dt(r['fecha_limite_reclamo']):%d/%m a las %H:%M}", "portal", "Ver fórmula"))
         elif r["estado"] == "CADUCADA" and r["requiere_reevaluacion"]:
             has_appt = clin.execute("SELECT 1 FROM citas WHERE prescripcion_origen_id = ? AND estado = 'PROGRAMADA'",

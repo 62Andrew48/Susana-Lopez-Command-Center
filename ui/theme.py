@@ -33,7 +33,7 @@ CHIP_TONES = {"ok": ("#D1FAE5", "#065F46"), "warn": ("#FEF3C7", "#92400E"), "dan
 EVENT_STYLE = {  # color del punto en la línea de tiempo de la historia clínica
     "NOTA_EVOLUCION": BLUE, "PRESCRIPCION": "#7C3AED", "DISPENSACION": EMERALD,
     "ADMINISTRACION_DOSIS": EMERALD, "FORMULA_CADUCADA": RED, "ALERTA": AMBER, "CITA": BLUE_LIGHT,
-    "INTERCONSULTA": BLUE_LIGHT,
+    "INTERCONSULTA": BLUE_LIGHT, "REGISTRO_HC": "#0F766E", "ADJUNTO": GREY, "DATOS_PACIENTE": GREY,
 }
 RX_STATE_TONE = {"VIGENTE": "info", "PARCIAL": "warn", "ENTREGADA": "ok", "CADUCADA": "danger", "ANULADA": "neutral"}
 

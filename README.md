@@ -110,21 +110,27 @@ muestra a cada rol solo sus secciones:
 | Asistente IA (página completa con SQL) | ✓ | ✓ | | |
 | Asistente flotante | ✓ | ✓ | limitado | solo sus datos |
 | Alertas y acciones (semáforo, orden de compra, acciones) | ✓ + CSV | ✓ | ✓ | |
-| Clínico y farmacia (historias, prescripción, dispensación) | | ✓ | ✓ (sin prescribir) | |
+| Pacientes (registrar, editar, inactivar) | ✓ | ✓ | | |
+| Buscar historias clínicas | ✓ (solo índice, sin contenido) | ✓ (con contenido) | | |
+| Historia clínica: registros y adjuntos (crear, corregir, anular) | | ✓ | lectura | la suya (lectura) |
+| Prescripción y entregas (apartado de 30 días) | | ✓ | ✓ (sin prescribir) | |
 | Mis fórmulas y citas | | | | ✓ |
 | Datos y auditoría (extractos, bitácora) | ✓ | | | |
 
 `clinico.db` se crea y se siembra sola en el primer arranque: 4 usuarios de demostración, turnos diurnos y
-6 historias clínicas sobre pacientes e ingresos **reales** del extracto. Las fórmulas y las citas son **sintéticas**.
+6 historias clínicas sobre pacientes e ingresos del extracto (que llegan anonimizados, sin nombre). Las fórmulas y las citas son **sintéticas**.
 El reloj de la cabecera (🕒) cambia a turno nocturno o reinicia el escenario sin tocar la base analítica.
 
 ### Guion de demostración (≈4 minutos)
 
 1. **Admin** → Hoy: 86,3 % de camas físicas ocupadas y "Hospitalización 2 al 100 %" con la cama libre más cercana
    ya ubicada → **Ver camas** → Piso 1. En la burbuja: *"¿Dónde hay camas libres para pediatría en el piso 4?"*.
-2. **Dra. Ruiz** → Clínico y farmacia: la historia del paciente 110 con su línea de tiempo inmutable.
-3. **Enf. Gómez** → Dispensación → **"Simular avance de 72 horas"**: 15 dosis de acetaminofén y 10 de enoxaparina
-   vuelven a stock. La enoxaparina, de continuidad crítica, genera una alerta en lugar de un bloqueo.
+2. **Dra. Ruiz** → Clínico y farmacia → Pacientes: registra un paciente nuevo → Historia clínica: crea una
+   consulta con un PDF adjunto, la corrige (queda la versión anterior con el motivo) y la anula (no se borra).
+   Buscar historias: la encuentra por diagnóstico. Prescripción: las unidades quedan **apartadas 30 días**.
+3. **Enf. Gómez** → Entregas y apartados → **"Avanzar el reloj · 30 días"**: las 15 tabletas de acetaminofén y
+   las 10 de enoxaparina que nadie reclamó vuelven a disponibles. La enoxaparina, de continuidad crítica, genera
+   una alerta en lugar de un bloqueo.
 4. **Paciente 110** → la campana avisa "Tu fórmula venció" → Mis fórmulas y citas → "Solicitar cita".
 5. **Dra. Ruiz** → Prescripción: "Atender cita" levanta el bloqueo.
 6. Reloj → **Turno de noche** → Historias: el acceso queda bloqueado → "Romper el vidrio" con justificación.

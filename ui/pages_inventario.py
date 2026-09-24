@@ -20,7 +20,7 @@ from ui import context as ctx
 from ui.theme import chip
 
 STATE = {"ROJO": "Urgente", "AMARILLO": "Pronto", "VERDE": "Suficiente", "SIN_CONSUMO": "Sin uso"}
-MOVE = {"SALDO_INICIAL": "Saldo inicial", "ENTRADA_COMPRA": "Llegada de pedido", "RESERVA": "Reserva por fórmula",
+MOVE = {"SALDO_INICIAL": "Saldo inicial", "ENTRADA_COMPRA": "Llegada de pedido", "RESERVA": "Apartado para paciente",
         "DISPENSACION": "Entrega al paciente", "LIBERACION_RESERVA": "Devolución a stock", "AJUSTE": "Ajuste por conteo",
         "BAJA_VENCIMIENTO": "Baja por vencimiento"}
 
@@ -38,7 +38,19 @@ def page_inventario() -> None:
                           chip("Existencias iniciales simuladas · cada movimiento es real", "neutral")]),
                 unsafe_allow_html=True)
 
-    tab_stock, tab_in, tab_count, tab_moves = st.tabs(["Existencias", "Llegada de pedido", "Conteo físico", "Movimientos"])
+    tab_stock, tab_held, tab_in, tab_count, tab_moves = st.tabs(["Existencias", "Apartados para pacientes",
+                                                                 "Llegada de pedido", "Conteo físico", "Movimientos"])
+    with tab_held:
+        held = ps.reservations(clin)
+        st.caption(f"Unidades formuladas que esperan a que el paciente las reclame. No están en “Quedan”: están "
+                   f"separadas para ese paciente hasta {ps.RESERVE_DAYS} días; si no las reclama, vuelven solas.")
+        if not held:
+            st.info("No hay unidades apartadas.")
+        else:
+            st.dataframe(pd.DataFrame([{"Ítem": h["producto"].capitalize(), "Paciente": h["paciente"],
+                                        "Apartadas": h["apartadas"], "Apartado hasta": h["fecha_limite_reclamo"][:16],
+                                        "Médico": h["medico"]} for h in held]),
+                         hide_index=True, width="stretch", height=min(38 * (len(held) + 1), 430))
     with tab_stock:
         q = st.text_input("Buscar", placeholder="Nombre del medicamento o insumo", key="inv_q")
         only = st.segmented_control("Mostrar", ["Todos", "Urgente", "Pronto"], default="Todos", key="inv_only")
@@ -53,7 +65,7 @@ def page_inventario() -> None:
         st.dataframe(table, hide_index=True, width="stretch", height=430, column_config={
             "nombre": st.column_config.TextColumn("Ítem", width="medium"), "tipo_item": None, "estado": "Estado",
             "disponible": st.column_config.NumberColumn("Quedan", format="%d"),
-            "reservado": st.column_config.NumberColumn("Apartadas para fórmulas", format="%d"),
+            "reservado": st.column_config.NumberColumn("Apartadas para pacientes", format="%d"),
             "consumo_diario_promedio": st.column_config.NumberColumn("Uso por día", format="%.1f"),
             "orden_sugerida_15d": st.column_config.NumberColumn("Recomendado pedir", format="%d")})
 

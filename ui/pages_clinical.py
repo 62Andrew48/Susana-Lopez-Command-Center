@@ -11,10 +11,12 @@ from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 
+import clinical_records as cr
 import demo_seed as ds
 import pharmacy_service as ps
 from agent import fmt_num
 from ui import context as ctx
+from ui import pages_hc as hc
 from ui.theme import (AMBER, BLUE, EMERALD, EVENT_STYLE, GREY, RED, RX_STATE_TONE, banner, card, chip, esc,
                       grid, section_title)
 
@@ -35,6 +37,13 @@ def _fmt_ts(ts: str) -> str:
     return _dt(ts).strftime("%d/%m/%Y %H:%M")
 
 
+def _left_text(limit: str) -> str:
+    h = _hours_left(limit)
+    if h < 0:
+        return "Vencido"
+    return f"{h:.0f} h" if h < 24 else f"{h / 24:.0f} días"
+
+
 def _countdown(limit: str) -> str:
     h = _hours_left(limit)
     if h < 0:
@@ -44,104 +53,32 @@ def _countdown(limit: str) -> str:
     return chip(f"Vence en {h / 24:.1f} días", "info")
 
 
-def _patient_selector(key: str) -> int | None:
-    patients = ps.clinical_patients(ctx.get_clin())
-    if not patients:
-        st.info("No hay historias clínicas abiertas.")
-        return None
-    labels = {p["id_paciente"]: f"Paciente {p['id_paciente']} · {p['formulas_activas']} fórmula(s) activa(s)"
-              for p in patients}
-    return st.selectbox("Paciente", list(labels), format_func=labels.get, key=key)
-
-
-def _gate(permission: str, id_paciente: int, key: str):
-    """Autoriza el acceso a datos del paciente. Fuera de turno ofrece 'romper el vidrio'."""
-    decision = ctx.authorize_once(permission, id_paciente, ctx.emergency_for(id_paciente))
-    if decision.allowed:
-        if decision.emergency:
-            banner(f"<b>Acceso de emergencia activo</b> para el paciente {id_paciente}. "
-                   f"Justificación: “{esc(ctx.emergency_for(id_paciente))}”. Quedó registrado en la bitácora.", "danger")
-        return decision
-    if "turno" in decision.reason.lower():
-        banner(f"<b>Estás fuera de turno.</b> Para abrir los datos del paciente {id_paciente} debes activar el "
-               "acceso de emergencia (“romper el vidrio”). La justificación quedará auditada.", "warn")
-        with st.form(f"breakglass_{key}"):
-            text = st.text_area("Justificación clínica", placeholder="Ej.: paciente en paro cardiorrespiratorio "
-                                "en urgencias, requiero antecedentes y medicación actual.")
-            if st.form_submit_button("Romper el vidrio y continuar", type="primary", icon=":material/lock_open:"):
-                if len(text.strip()) < 20:
-                    st.error("Escribe una justificación de al menos 20 caracteres.")
-                else:
-                    ctx.set_emergency(id_paciente, text.strip())
-                    st.rerun()
-    else:
-        banner(f"Acceso denegado: {esc(decision.reason)}.", "danger")
-    return decision
-
-
 # ===========================================================================
 # D. MÓDULO CLÍNICO Y FARMACIA
 # ===========================================================================
 def page_clinico() -> None:
     tabs, views = [], []
+    if ctx.can("pacientes.registrar"):
+        tabs.append("Pacientes"); views.append(hc.patients_tab)
     if ctx.can("hc.ver_notas") or ctx.can("hc.ver_completa"):
-        tabs.append("Historias clínicas"); views.append(_history_tab)
+        tabs.append("Historia clínica"); views.append(hc.history_tab)
+    if ctx.can("hc.buscar"):
+        tabs.append("Buscar historias"); views.append(hc.search_tab)
     if ctx.can("prescripcion.crear"):
         tabs.append("Prescripción"); views.append(_prescription_tab)
-    tabs.append("Dispensación y retorno a stock"); views.append(_dispensing_tab)
+    if ctx.can("dispensacion.registrar") or ctx.can("prescripcion.crear"):
+        tabs.append("Entregas y apartados"); views.append(_dispensing_tab)
     for tab, view in zip(st.tabs(tabs), views):
         with tab:
             view()
 
 
-def _history_tab() -> None:
-    id_paciente = _patient_selector("hc_patient")
-    if id_paciente is None:
-        return
-    full = ctx.can("hc.ver_completa")
-    decision = _gate("hc.ver_completa" if full else "hc.ver_notas", id_paciente, "hc")
-    if not decision.allowed:
-        return
-    clin = ctx.get_clin()
-    events = ps.patient_timeline(clin, id_paciente)
-    if not full:  # enfermería: notas clínicas y órdenes, sin gestión de citas
-        events = [e for e in events if e["tipo"] not in ("CITA", "INTERCONSULTA")]
-    left, right = st.columns([1.35, 1], gap="large")
-    with left:
-        section_title("Línea de tiempo (inmutable)")
-        items = []
-        for e in events:
-            author = esc(e["autor"])
-            ingreso = f" · ingreso {e['oid_ingreso']}" if e["oid_ingreso"] else ""
-            items.append(f'<div class="tl-item" style="--dot:{EVENT_STYLE.get(e["tipo"], GREY)}">'
-                         f'<div class="tl-meta">{_fmt_ts(e["fecha"])} · {esc(e["tipo"].replace("_", " ").capitalize())}'
-                         f' · {author}{ingreso}</div><div class="tl-text">{esc(e["descripcion"])}</div></div>')
-        st.markdown(f'<div class="timeline">{"".join(items)}</div>' if items else "Sin eventos registrados.",
-                    unsafe_allow_html=True)
-        st.caption("Los eventos no se editan ni se eliminan: las correcciones se registran como un evento nuevo.")
-    with right:
-        section_title("Fórmulas" if full else "Órdenes vigentes")
-        rx = ps.patient_prescriptions(clin, id_paciente)
-        if not full:
-            rx = [r for r in rx if r["estado"] in ("VIGENTE", "PARCIAL")]
-        cards = [card(r["producto"].capitalize()[:60],
-                      f"{esc(r['dosis'])} cada {r['frecuencia_horas']} h · {r['ambito'].lower()}<br>"
-                      f"{r['dosis_entregadas']}/{r['dosis_prescritas']} dosis entregadas · {esc(r['medico'])}",
-                      {"CADUCADA": RED, "ENTREGADA": EMERALD, "PARCIAL": AMBER}.get(r["estado"], BLUE),
-                      chip(r["estado"].capitalize(), RX_STATE_TONE[r["estado"]]),
-                      progress=r["dosis_entregadas"] / r["dosis_prescritas"]) for r in rx]
-        if cards:
-            grid(cards)
-        else:
-            st.caption("Sin fórmulas.")
-
-
 def _prescription_tab() -> None:
     clin = ctx.get_clin()
-    id_paciente = _patient_selector("rx_patient")
+    id_paciente = hc.pick_patient("rx")
     if id_paciente is None:
         return
-    decision = _gate("prescripcion.crear", id_paciente, "rx")
+    decision = hc.gate("prescripcion.crear", id_paciente, "rx")
     if not decision.allowed:
         return
     products = {r["codigo"]: r["nombre"] for r in clin.execute(
@@ -174,14 +111,17 @@ def _prescription_tab() -> None:
         units = c4.number_input("Dosis a dispensar", 1, 2000, math.ceil(days * 24 / freq),
                                 help="Calculado como duración × 24 / frecuencia; se puede ajustar.")
         scope = c5.selectbox("Ámbito", ["AMBULATORIA", "HOSPITALARIA"])
-        window = c6.slider("Ventana de reclamo (h)", 24, 168, 72, 12, disabled=scope == "HOSPITALARIA")
+        c6.markdown(f"<div style='padding-top:1.9rem;font-size:0.9rem'>"
+                    + (f"Se apartan para el paciente por <b>{ps.RESERVE_DAYS} días</b>" if scope == "AMBULATORIA"
+                       else "Se entrega en piso (no se aparta)") + "</div>", unsafe_allow_html=True)
         if st.button("Formular y reservar stock", type="primary"):
             try:
                 pid = ps.prescribe(clin, medico_id=ctx.user_id(), id_paciente=id_paciente, codigo=codigo,
                                    dosis=dosis, frecuencia_horas=int(freq), duracion_dias=int(days),
-                                   dosis_prescritas=int(units), ambito=scope, horas_ventana=int(window), now=ctx.clock())
-                st.success(f"Fórmula #{pid} creada. " + ("Se reservaron las unidades y el plazo de reclamo empezó a "
-                           "correr." if scope == "AMBULATORIA" else "Queda en la cola de dispensación hospitalaria."))
+                                   dosis_prescritas=int(units), ambito=scope, now=ctx.clock())
+                st.success(f"Fórmula #{pid} creada. " + (f"Las {int(units)} unidades quedan apartadas para el paciente "
+                           f"{ps.RESERVE_DAYS} días; si no las reclama, vuelven a estar disponibles."
+                           if scope == "AMBULATORIA" else "Queda en la cola de dispensación hospitalaria."))
                 st.toast("Fórmula registrada en la historia clínica", icon=":material/edit_note:")
             except sqlite3.IntegrityError as exc:
                 st.error(f"No se pudo formular: {exc}")
@@ -207,18 +147,21 @@ def _dispensing_tab() -> None:
     reserved = sum(r["pendientes"] for r in queue if r["ambito"] == "AMBULATORIA")
     soon = sum(1 for r in queue if r["ambito"] == "AMBULATORIA" and _hours_left(r["fecha_limite_reclamo"]) < 24)
 
-    # --- Simulación para el pitch ---
-    left, right = st.columns([2, 1], vertical_alignment="center")
-    left.markdown(" ".join([chip(f"Reloj clínico: {_fmt_ts(ctx.clock())}", "info"),
-                            chip(f"{len(queue)} fórmulas en cola", "neutral"),
-                            chip(f"{fmt_num(reserved)} dosis reservadas", "neutral"),
-                            chip(f"{soon} vencen en < 24 h", "warn" if soon else "ok")]), unsafe_allow_html=True)
-    if right.button("Simular avance de 72 horas", icon=":material/fast_forward:", type="primary", width="stretch",
-                    help="Adelanta el reloj clínico y ejecuta expire_prescriptions()"):
+    # --- Simulación para el pitch: adelantar el reloj clínico y ejecutar el job de caducidad ---
+    st.markdown(" ".join([chip(f"Reloj clínico: {_fmt_ts(ctx.clock())}", "info"),
+                          chip(f"{len(queue)} fórmulas en cola", "neutral"),
+                          chip(f"{fmt_num(reserved)} unidades apartadas", "neutral"),
+                          chip(f"{soon} vencen en < 24 h", "warn" if soon else "ok")]), unsafe_allow_html=True)
+    left, right = st.columns([2, 1], vertical_alignment="bottom")
+    jump = left.segmented_control("Simular el paso del tiempo", ["1 día", "7 días", f"{ps.RESERVE_DAYS} días"],
+                                  default=f"{ps.RESERVE_DAYS} días", key="sim_jump",
+                                  help="Adelanta el reloj de la demo y ejecuta el job que devuelve a stock lo no reclamado")
+    if right.button("Avanzar el reloj", icon=":material/fast_forward:", type="primary", width="stretch"):
+        hours = int((jump or "1").split()[0]) * 24
         before_clock = ctx.clock()
         codes = list({r["codigo_producto"] for r in queue})
         before = {c: dict(v) for c, v in ps.stock_of(clin, codes).items()}
-        new_clock = ds.shift_clock(clin, 72)
+        new_clock = ds.shift_clock(clin, hours)
         expired = ps.expire_prescriptions(clin, new_clock)
         after = {c: dict(v) for c, v in ps.stock_of(clin, codes).items()}
         st.session_state.last_simulation = {"from": before_clock, "to": new_clock, "before": before,
@@ -236,26 +179,43 @@ def _dispensing_tab() -> None:
                 b, a = sim["before"].get(d["codigo_producto"], {}), sim["after"].get(d["codigo_producto"], {})
                 body = (f"Paciente {d['id_paciente']} · venció {_fmt_ts(d['fecha_limite_reclamo'])}<br>"
                         f"Disponible: {fmt_num(b.get('disponible'))} → <b>{fmt_num(a.get('disponible'))}</b> · "
-                        f"Reservado: {fmt_num(b.get('reservado'))} → {fmt_num(a.get('reservado'))}<br>"
+                        f"Apartado: {fmt_num(b.get('reservado'))} → {fmt_num(a.get('reservado'))}<br>"
                         "<i>HC: “Fórmula caducada - Medicamentos no reclamados en el periodo permitido”</i>")
                 if d["critico_continuidad"]:
                     body += "<br><b>Continuidad crítica:</b> alerta de búsqueda activa, sin bloqueo de nueva fórmula."
                 cards.append(card(d["producto"].capitalize()[:60], body, RED, chip("Caducada", "danger"),
-                                  big=f"+{d['devueltas']} dosis a stock"))
+                                  big=f"+{d['devueltas']} und. vuelven a disponibles"))
             if cards:
                 grid(cards)
             if st.button("Ocultar resultado"):
                 st.session_state.pop("last_simulation")
                 st.rerun()
 
+    # --- Apartados por paciente ---
+    section_title("Unidades apartadas para pacientes")
+    held = ps.reservations(clin)
+    if not held:
+        st.caption("No hay unidades apartadas.")
+    else:
+        st.caption(f"Al formular, las unidades salen de “disponibles” y quedan apartadas para ese paciente hasta que "
+                   f"las reclame (máximo {ps.RESERVE_DAYS} días). Si no las reclama, vuelven solas a disponibles.")
+        st.dataframe(pd.DataFrame([{
+            "Paciente": h["paciente"], "Medicamento": h["producto"].capitalize(), "Apartadas": h["apartadas"],
+            "Formulada": _fmt_ts(h["fecha_prescripcion"]), "Apartado hasta": _fmt_ts(h["fecha_limite_reclamo"]),
+            "Quedan": _left_text(h["fecha_limite_reclamo"]), "Médico": h["medico"]} for h in held]),
+            hide_index=True, width="stretch", height=min(38 * (len(held) + 1), 260))
+
     # --- Cola de entrega ---
-    section_title("Cola de dispensación")
+    section_title("Cola de entrega")
     can_dispense = ctx.can("dispensacion.registrar")
     if not can_dispense:
         st.caption("Vista de consulta: la entrega la registra enfermería o farmacia.")
     if not queue:
         st.info("No hay fórmulas pendientes de entrega.")
+    names = {h["id_paciente"]: h["paciente"] for h in held}
     for r in queue:
+        pt = cr.get_patient(clin, r["id_paciente"])
+        who = names.get(r["id_paciente"]) or (cr.display_name(pt) if pt else f"Paciente {r['id_paciente']}")
         with st.container(border=True):
             info_col, act_col = st.columns([3, 1.2], vertical_alignment="center")
             tags = [chip(r["estado"].capitalize(), RX_STATE_TONE[r["estado"]]), chip(r["ambito"].capitalize(), "neutral")]
@@ -264,7 +224,7 @@ def _dispensing_tab() -> None:
             if r["critico_continuidad"]:
                 tags.append(chip("Continuidad crítica", "info"))
             info_col.markdown(
-                f"**{esc(r['producto'].capitalize())}** · paciente {r['id_paciente']}<br>"
+                f"**{esc(r['producto'].capitalize())}** · {esc(who)}<br>"
                 f"<span class='muted'>{esc(r['dosis'])} · {r['dosis_entregadas']}/{r['dosis_prescritas']} entregadas · "
                 f"{esc(r['medico'])}</span><br>" + " ".join(tags), unsafe_allow_html=True)
             qty = act_col.number_input("Cantidad", 1, int(r["pendientes"]), min(int(r["pendientes"]), 7),
@@ -297,7 +257,22 @@ def page_portal() -> None:
     st.markdown(f'<div class="brand"><h1 style="color:#111827">Hola, {esc(user["nombre_mostrado"])}</h1></div>',
                 unsafe_allow_html=True)
     st.caption("Aquí solo ves tu propia información. Ningún otro paciente puede verla.")
-    tab_rx, tab_appt = st.tabs(["Mis fórmulas", "Mis citas"])
+    tab_rx, tab_appt, tab_hc = st.tabs(["Mis fórmulas", "Mis citas", "Mi historia clínica"])
+    with tab_hc:
+        st.markdown(hc.CSS, unsafe_allow_html=True)
+        st.caption("Tus registros clínicos y documentos. Tienes derecho a conocerlos (Res. 1995 de 1999).")
+        recs = cr.records(clin, id_paciente, include_annulled=False)
+        files = [dict(a) for a in cr.attachments(clin, id_paciente, include_annulled=False)]
+        if not recs and not files:
+            st.info("Aún no hay registros en tu historia clínica.")
+        for r in recs:
+            hc._record_card(r, [a for a in files if a["registro_id"] == r["id"]], id_paciente, False)
+        loose = [a for a in files if a["registro_id"] is None]
+        if loose:
+            section_title("Documentos")
+            cols = st.columns(3)
+            for i, a in enumerate(loose):
+                hc._download_button(cols[i % 3], a, id_paciente, "portal")
     with tab_rx:
         rx = ps.patient_prescriptions(clin, id_paciente)
         if not rx:
@@ -308,9 +283,10 @@ def page_portal() -> None:
                     f"Médico: {esc(r['medico'])} · formulada {_fmt_ts(r['fecha_prescripcion'])}<br>"
                     f"Entregadas {r['dosis_entregadas']} de {r['dosis_prescritas']} dosis")
             if r["estado"] in ("VIGENTE", "PARCIAL") and r["ambito"] == "AMBULATORIA":
-                body += f"<br>Reclama antes de <b>{_fmt_ts(r['fecha_limite_reclamo'])}</b> " + _countdown(r["fecha_limite_reclamo"])
+                body += (f"<br>Apartado para ti hasta el <b>{_fmt_ts(r['fecha_limite_reclamo'])}</b> "
+                         + _countdown(r["fecha_limite_reclamo"]))
             if r["estado"] == "CADUCADA":
-                body += "<br>Venció el plazo de reclamo; las dosis pendientes volvieron a la farmacia."
+                body += "<br>Pasaron los 30 días sin reclamarlo; las unidades apartadas volvieron a la farmacia."
             cards.append(card(r["producto"].capitalize()[:60], body,
                               {"CADUCADA": RED, "ENTREGADA": EMERALD, "PARCIAL": AMBER}.get(r["estado"], BLUE),
                               chip(r["estado"].capitalize(), RX_STATE_TONE[r["estado"]]),

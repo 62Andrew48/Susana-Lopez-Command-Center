@@ -23,6 +23,9 @@ CLINICAL_DB = BASE_DIR / "clinico.db"
 # Grupos ATC cuya suspensión abrupta es riesgosa: no se bloquean, se alertan
 CONTINUITY_ATC_PREFIXES = ("A10A", "B01A", "N03A", "J05A", "H02AB", "C01AA", "L04A")
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
+SCHEMA_VERSION = 2          # debe coincidir con el PRAGMA user_version del final de schema_clinico.sql
+RESERVE_DAYS = 30           # las unidades formuladas quedan apartadas para el paciente durante 30 días
+RESERVE_HOURS = RESERVE_DAYS * 24
 
 
 def _now(now: datetime | str | None) -> str:
@@ -40,10 +43,23 @@ def connect(path: Path | str = CLINICAL_DB) -> sqlite3.Connection:
 
 def init_clinical_db(analytics_db: Path | str, path: Path | str = CLINICAL_DB) -> sqlite3.Connection:
     """Crea clinico.db (si no existe) y carga el catálogo y el saldo inicial desde hospital.db."""
-    fresh = not Path(path).exists()
+    path = Path(path)
+    if path.exists():
+        conn = connect(path)
+        if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+            return conn
+        # Base de una versión anterior: se guarda un respaldo y se recrea (es la base de la demo).
+        conn.close()
+        backup = path.with_name(f"{path.stem}_respaldo_v{SCHEMA_VERSION - 1}{path.suffix}")
+        try:
+            backup.unlink(missing_ok=True)
+            path.rename(backup)
+        except PermissionError as exc:  # Windows: otra app (o una ventana vieja de Streamlit) la tiene abierta
+            raise RuntimeError("clinico.db es de una versión anterior y está en uso: cierra todas las ventanas "
+                               "de Streamlit y vuelve a ejecutar la app") from exc
+        for suffix in ("-wal", "-shm"):
+            Path(f"{path}{suffix}").unlink(missing_ok=True)
     conn = connect(path)
-    if not fresh:
-        return conn
     conn.executescript(SCHEMA_FILE.read_text(encoding="utf-8"))
     src = sqlite3.connect(f"{Path(analytics_db).resolve().as_uri()}?mode=ro", uri=True)
     rows = src.execute("SELECT codigo, nombre, tipo_item, consumo_diario_promedio, stock_actual "
@@ -117,7 +133,7 @@ class Decision:
 
 
 CLINICAL_PERMS = {"hc.ver_completa", "hc.ver_notas", "prescripcion.crear", "dispensacion.registrar",
-                  "dosis.registrar"}
+                  "dosis.registrar", "hc.registrar"}
 
 
 def authorize(conn: sqlite3.Connection, user_id: int, permission: str, id_paciente: int | None = None,
@@ -223,7 +239,7 @@ def product_status(conn: sqlite3.Connection, codigo: str, id_paciente: int | Non
 
 def prescribe(conn: sqlite3.Connection, *, medico_id: int, id_paciente: int, codigo: str, dosis: str,
               frecuencia_horas: int, duracion_dias: int, dosis_prescritas: int, ambito: str,
-              horas_ventana: int, now: datetime | str | None = None) -> int:
+              horas_ventana: int = RESERVE_HOURS, now: datetime | str | None = None) -> int:
     """Crea la fórmula; los triggers reservan stock, registran la HC y aplican el bloqueo R1.
     Lanza sqlite3.IntegrityError con un mensaje legible si una regla lo impide."""
     ts = _now(now)
@@ -386,3 +402,26 @@ def movements(conn: sqlite3.Connection, codigo: str | None = None, limit: int = 
           FROM inventario_movimientos m JOIN productos_farmacia f ON f.codigo = m.codigo_producto
           LEFT JOIN usuarios u ON u.id = m.usuario_id {where}
          ORDER BY m.id DESC LIMIT ?""", params).fetchall()
+
+
+def reservations(conn: sqlite3.Connection, codigo: str | None = None) -> list[sqlite3.Row]:
+    """Unidades apartadas para pacientes (fórmulas ambulatorias vigentes con dosis por reclamar)."""
+    where, args = ("AND p.codigo_producto = ?", [codigo]) if codigo else ("", [])
+    return conn.execute(f"""
+        SELECT p.id, p.id_paciente, p.codigo_producto, f.nombre AS producto,
+               p.dosis_prescritas - p.dosis_entregadas AS apartadas, p.fecha_prescripcion, p.fecha_limite_reclamo,
+               p.estado, u.nombre_mostrado AS medico,
+               COALESCE(NULLIF(trim(pc.nombres || ' ' || pc.apellidos), ''), 'Paciente ' || p.id_paciente) AS paciente
+          FROM prescripciones p JOIN productos_farmacia f ON f.codigo = p.codigo_producto
+          JOIN usuarios u ON u.id = p.medico_id
+          LEFT JOIN pacientes_clinicos pc ON pc.id_paciente = p.id_paciente
+         WHERE p.ambito = 'AMBULATORIA' AND p.estado IN ('VIGENTE','PARCIAL') {where}
+         ORDER BY p.fecha_limite_reclamo""", args).fetchall()
+
+
+def audit(conn: sqlite3.Connection, user_id: int, accion: str, recurso: str, id_paciente: int | None = None,
+          now: datetime | str | None = None) -> None:
+    """Deja rastro de una acción (búsquedas, descargas de adjuntos) en la bitácora inmutable."""
+    with conn:
+        conn.execute("INSERT INTO auditoria_accesos(fecha, usuario_id, accion, recurso, id_paciente) "
+                     "VALUES (?,?,?,?,?)", (_now(now), user_id, accion, recurso[:300], id_paciente))

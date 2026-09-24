@@ -114,7 +114,8 @@ CREATE TABLE historia_clinica_eventos (
     historia_id    INTEGER NOT NULL REFERENCES historias_clinicas(id),
     oid_ingreso    INTEGER,                              -- episodio del HIS (ref. lógica)
     tipo           TEXT NOT NULL CHECK (tipo IN ('NOTA_EVOLUCION','PRESCRIPCION','DISPENSACION',
-                     'ADMINISTRACION_DOSIS','FORMULA_CADUCADA','INTERCONSULTA','CITA','ALERTA')),
+                     'ADMINISTRACION_DOSIS','FORMULA_CADUCADA','INTERCONSULTA','CITA','ALERTA',
+                     'REGISTRO_HC','ADJUNTO','DATOS_PACIENTE')),
     descripcion    TEXT NOT NULL,
     autor_id       INTEGER REFERENCES usuarios(id),      -- NULL = proceso automático del sistema
     fecha          TEXT NOT NULL DEFAULT (datetime('now'))
@@ -167,7 +168,9 @@ CREATE TABLE prescripciones (
     dosis_entregadas       INTEGER NOT NULL DEFAULT 0,
     ambito                 TEXT NOT NULL CHECK (ambito IN ('AMBULATORIA','HOSPITALARIA')),
     fecha_prescripcion     TEXT NOT NULL DEFAULT (datetime('now')),
-    horas_ventana_reclamo  INTEGER NOT NULL DEFAULT 72 CHECK (horas_ventana_reclamo BETWEEN 24 AND 168),
+    -- Las unidades quedan APARTADAS para el paciente durante la ventana (30 días por defecto); si no las
+    -- reclama, el job de caducidad las devuelve a disponibles (trigger R4).
+    horas_ventana_reclamo  INTEGER NOT NULL DEFAULT 720 CHECK (horas_ventana_reclamo BETWEEN 24 AND 720),
     fecha_limite_reclamo   TEXT GENERATED ALWAYS AS
                            (datetime(fecha_prescripcion, '+' || horas_ventana_reclamo || ' hours')) STORED,
     estado                 TEXT NOT NULL DEFAULT 'VIGENTE'
@@ -259,7 +262,7 @@ BEGIN
     INSERT INTO inventario_movimientos(codigo_producto, tipo, delta_disponible, delta_reservado,
                                        prescripcion_id, usuario_id, nota, fecha)
     VALUES (NEW.codigo_producto, 'RESERVA', -NEW.dosis_prescritas, NEW.dosis_prescritas, NEW.id,
-            NEW.medico_id, 'Reserva automática por prescripción', NEW.fecha_prescripcion);
+            NEW.medico_id, 'Apartado para el paciente por prescripción', NEW.fecha_prescripcion);
     INSERT INTO historia_clinica_eventos(historia_id, oid_ingreso, tipo, descripcion, autor_id, fecha)
     VALUES (NEW.historia_id, NEW.oid_ingreso, 'PRESCRIPCION',
             'Formula ' || NEW.dosis_prescritas || ' dosis de ' ||
@@ -354,6 +357,163 @@ BEGIN
 END;
 
 -- -----------------------------------------------------------------------------
+-- 3b. Registro de pacientes, registros de historia clínica y adjuntos (CRUD con trazabilidad)
+--     Res. 1995 de 1999: la historia clínica no se destruye. "Modificar" guarda la versión anterior
+--     con quién, cuándo y por qué; "eliminar" es ANULAR con motivo (el registro sigue existiendo).
+-- -----------------------------------------------------------------------------
+CREATE TABLE pacientes_clinicos (
+    id_paciente       INTEGER PRIMARY KEY,               -- HIS: mismo id del extracto; nuevos: desde 1.000.000
+    origen            TEXT NOT NULL CHECK (origen IN ('HIS','REGISTRO')),
+    tipo_documento    TEXT,
+    numero_documento  TEXT,
+    nombres           TEXT NOT NULL,
+    apellidos         TEXT NOT NULL DEFAULT '',
+    fecha_nacimiento  TEXT,
+    edad              INTEGER CHECK (edad IS NULL OR edad BETWEEN 0 AND 120),
+    sexo              TEXT CHECK (sexo IS NULL OR sexo IN ('Femenino','Masculino','Intersexual')),
+    telefono          TEXT,
+    direccion         TEXT,
+    asegurador        TEXT,
+    regimen           TEXT,
+    municipio         TEXT,
+    estado            TEXT NOT NULL DEFAULT 'ACTIVO' CHECK (estado IN ('ACTIVO','INACTIVO')),
+    creado_por        INTEGER REFERENCES usuarios(id),
+    creado_en         TEXT NOT NULL DEFAULT (datetime('now')),
+    actualizado_por   INTEGER REFERENCES usuarios(id),
+    actualizado_en    TEXT,
+    CHECK (origen = 'HIS' OR numero_documento IS NOT NULL)
+);
+CREATE UNIQUE INDEX ux_paciente_documento ON pacientes_clinicos(tipo_documento, numero_documento)
+    WHERE numero_documento IS NOT NULL;
+CREATE TRIGGER trg_paciente_no_delete BEFORE DELETE ON pacientes_clinicos
+BEGIN SELECT RAISE(ABORT, 'Los pacientes no se eliminan; márquelo como INACTIVO'); END;
+
+CREATE TABLE hc_registros (
+    id                 INTEGER PRIMARY KEY,
+    historia_id        INTEGER NOT NULL REFERENCES historias_clinicas(id),
+    tipo               TEXT NOT NULL CHECK (tipo IN ('CONSULTA','EVOLUCION','ANTECEDENTES','RESULTADO_EXAMEN',
+                                                     'EPICRISIS')),
+    titulo             TEXT NOT NULL CHECK (length(trim(titulo)) >= 3),
+    contenido          TEXT NOT NULL CHECK (length(trim(contenido)) >= 10),
+    diagnostico_cie10  TEXT,
+    diagnostico_nombre TEXT,
+    plan               TEXT,
+    autor_id           INTEGER NOT NULL REFERENCES usuarios(id),
+    creado_en          TEXT NOT NULL,
+    version            INTEGER NOT NULL DEFAULT 1,
+    actualizado_por    INTEGER REFERENCES usuarios(id),
+    actualizado_en     TEXT,
+    motivo_cambio      TEXT,
+    estado             TEXT NOT NULL DEFAULT 'ACTIVO' CHECK (estado IN ('ACTIVO','ANULADO')),
+    motivo_anulacion   TEXT,
+    CHECK (estado = 'ACTIVO' OR motivo_anulacion IS NOT NULL),
+    CHECK (version = 1 OR motivo_cambio IS NOT NULL)
+);
+CREATE INDEX ix_hc_registros ON hc_registros(historia_id, creado_en);
+
+-- Versiones anteriores (append-only)
+CREATE TABLE hc_registros_versiones (
+    id                 INTEGER PRIMARY KEY,
+    registro_id        INTEGER NOT NULL REFERENCES hc_registros(id),
+    version            INTEGER NOT NULL,
+    titulo             TEXT NOT NULL,
+    contenido          TEXT NOT NULL,
+    diagnostico_cie10  TEXT,
+    diagnostico_nombre TEXT,
+    plan               TEXT,
+    vigente_desde      TEXT NOT NULL,
+    reemplazada_en     TEXT NOT NULL,
+    reemplazada_por    INTEGER REFERENCES usuarios(id),
+    motivo_reemplazo   TEXT NOT NULL,
+    UNIQUE (registro_id, version)
+);
+CREATE TRIGGER trg_hc_versiones_no_update BEFORE UPDATE ON hc_registros_versiones
+BEGIN SELECT RAISE(ABORT, 'Las versiones de la historia clínica no se modifican'); END;
+CREATE TRIGGER trg_hc_versiones_no_delete BEFORE DELETE ON hc_registros_versiones
+BEGIN SELECT RAISE(ABORT, 'Las versiones de la historia clínica no se eliminan'); END;
+
+CREATE TRIGGER trg_hc_registro_no_delete BEFORE DELETE ON hc_registros
+BEGIN SELECT RAISE(ABORT, 'Los registros de la historia clínica no se eliminan; anúlelos con un motivo'); END;
+
+CREATE TRIGGER trg_hc_registro_anulado_inmutable BEFORE UPDATE ON hc_registros
+WHEN OLD.estado = 'ANULADO'
+BEGIN SELECT RAISE(ABORT, 'Un registro anulado no se puede modificar'); END;
+
+-- Corrección: versión +1, motivo obligatorio y copia de lo anterior
+CREATE TRIGGER trg_hc_registro_correccion BEFORE UPDATE OF titulo, contenido, diagnostico_cie10,
+    diagnostico_nombre, plan ON hc_registros
+WHEN NEW.estado = 'ACTIVO'
+BEGIN
+    SELECT CASE
+      WHEN NEW.version <> OLD.version + 1 THEN RAISE(ABORT, 'Cada corrección debe subir la versión en 1')
+      WHEN NEW.motivo_cambio IS NULL OR length(trim(NEW.motivo_cambio)) < 10
+        THEN RAISE(ABORT, 'Escribe el motivo de la corrección (mínimo 10 caracteres)')
+    END;
+    INSERT INTO hc_registros_versiones(registro_id, version, titulo, contenido, diagnostico_cie10,
+        diagnostico_nombre, plan, vigente_desde, reemplazada_en, reemplazada_por, motivo_reemplazo)
+    VALUES (OLD.id, OLD.version, OLD.titulo, OLD.contenido, OLD.diagnostico_cie10, OLD.diagnostico_nombre,
+            OLD.plan, COALESCE(OLD.actualizado_en, OLD.creado_en), NEW.actualizado_en, NEW.actualizado_por,
+            NEW.motivo_cambio);
+END;
+
+CREATE TRIGGER trg_hc_registro_evento_nuevo AFTER INSERT ON hc_registros
+BEGIN
+    INSERT INTO historia_clinica_eventos(historia_id, tipo, descripcion, autor_id, fecha)
+    VALUES (NEW.historia_id, 'REGISTRO_HC', 'Nuevo registro (' || lower(replace(NEW.tipo, '_', ' ')) || '): ' ||
+            NEW.titulo, NEW.autor_id, NEW.creado_en);
+END;
+
+CREATE TRIGGER trg_hc_registro_evento_cambio AFTER UPDATE ON hc_registros
+WHEN NEW.version > OLD.version OR (NEW.estado = 'ANULADO' AND OLD.estado = 'ACTIVO')
+BEGIN
+    INSERT INTO historia_clinica_eventos(historia_id, tipo, descripcion, autor_id, fecha)
+    VALUES (NEW.historia_id, 'REGISTRO_HC',
+            CASE WHEN NEW.estado = 'ANULADO'
+                 THEN 'Registro anulado: ' || NEW.titulo || ' · motivo: ' || NEW.motivo_anulacion
+                 ELSE 'Registro corregido (versión ' || NEW.version || '): ' || NEW.titulo || ' · motivo: ' ||
+                      NEW.motivo_cambio END,
+            NEW.actualizado_por, NEW.actualizado_en);
+END;
+
+-- Adjuntos (PDF o imagen de exámenes, epicrisis externas…). Máximo 5 MB.
+CREATE TABLE hc_adjuntos (
+    id                INTEGER PRIMARY KEY,
+    historia_id       INTEGER NOT NULL REFERENCES historias_clinicas(id),
+    registro_id       INTEGER REFERENCES hc_registros(id),
+    nombre_archivo    TEXT NOT NULL,
+    tipo_mime         TEXT NOT NULL CHECK (tipo_mime IN ('application/pdf','image/png','image/jpeg')),
+    tamano_bytes      INTEGER NOT NULL CHECK (tamano_bytes BETWEEN 1 AND 5242880),
+    sha256            TEXT NOT NULL,
+    contenido         BLOB NOT NULL,
+    descripcion       TEXT,
+    subido_por        INTEGER NOT NULL REFERENCES usuarios(id),
+    subido_en         TEXT NOT NULL,
+    estado            TEXT NOT NULL DEFAULT 'ACTIVO' CHECK (estado IN ('ACTIVO','ANULADO')),
+    anulado_por       INTEGER REFERENCES usuarios(id),
+    anulado_en        TEXT,
+    motivo_anulacion  TEXT,
+    CHECK (estado = 'ACTIVO' OR motivo_anulacion IS NOT NULL)
+);
+CREATE INDEX ix_hc_adjuntos ON hc_adjuntos(historia_id);
+CREATE TRIGGER trg_adjunto_no_delete BEFORE DELETE ON hc_adjuntos
+BEGIN SELECT RAISE(ABORT, 'Los adjuntos no se eliminan; anúlelos con un motivo'); END;
+CREATE TRIGGER trg_adjunto_contenido_inmutable BEFORE UPDATE OF contenido, sha256, nombre_archivo ON hc_adjuntos
+BEGIN SELECT RAISE(ABORT, 'Un adjunto no se reemplaza: anúlelo y suba uno nuevo'); END;
+CREATE TRIGGER trg_adjunto_evento AFTER INSERT ON hc_adjuntos
+BEGIN
+    INSERT INTO historia_clinica_eventos(historia_id, tipo, descripcion, autor_id, fecha)
+    VALUES (NEW.historia_id, 'ADJUNTO', 'Adjunto cargado: ' || NEW.nombre_archivo ||
+            COALESCE(' · ' || NEW.descripcion, ''), NEW.subido_por, NEW.subido_en);
+END;
+CREATE TRIGGER trg_adjunto_evento_anulado AFTER UPDATE OF estado ON hc_adjuntos
+WHEN NEW.estado = 'ANULADO' AND OLD.estado = 'ACTIVO'
+BEGIN
+    INSERT INTO historia_clinica_eventos(historia_id, tipo, descripcion, autor_id, fecha)
+    VALUES (NEW.historia_id, 'ADJUNTO', 'Adjunto anulado: ' || NEW.nombre_archivo || ' · motivo: ' ||
+            NEW.motivo_anulacion, NEW.anulado_por, NEW.anulado_en);
+END;
+
+-- -----------------------------------------------------------------------------
 -- 4. Datos semilla: roles y matriz de permisos
 -- -----------------------------------------------------------------------------
 INSERT INTO roles(id, codigo, nombre) VALUES
@@ -375,16 +535,24 @@ INSERT INTO permisos(codigo, descripcion) VALUES
  ('interconsulta.solicitar',    'Solicitar interconsultas'),
  ('dispensacion.registrar',     'Entregar medicamentos de farmacia'),
  ('dosis.registrar',            'Registrar administración de dosis'),
- ('portal.propio',              'Citas, fórmulas e historial PROPIOS');
+ ('portal.propio',              'Citas, fórmulas e historial PROPIOS'),
+ ('pacientes.registrar',        'Registrar pacientes y actualizar sus datos'),
+ ('hc.registrar',               'Crear, corregir y anular registros de historia clínica y adjuntos'),
+ ('hc.buscar',                  'Buscar historias clínicas (gerencia: solo índice, sin contenido clínico)');
 
 INSERT INTO rol_permisos(rol_id, permiso_id)
 SELECT r.id, p.id FROM roles r JOIN permisos p ON
   (r.codigo = 'ADMIN'      AND p.codigo IN ('tablero.gerencial.ver','agente.consultar','usuarios.administrar',
                                              'auditoria.ver','inventario.auditar','farmacia.alertas.ver',
-                                             'farmacia.orden_compra','camas.ver'))
+                                             'farmacia.orden_compra','camas.ver','pacientes.registrar',
+                                             'hc.buscar'))
   OR (r.codigo = 'DOCTOR'  AND p.codigo IN ('agente.consultar','farmacia.alertas.ver','camas.ver','hc.ver_completa',
                                              'hc.ver_notas','hc.acceso_emergencia','prescripcion.crear',
-                                             'interconsulta.solicitar'))
+                                             'interconsulta.solicitar','pacientes.registrar','hc.registrar',
+                                             'hc.buscar'))
   OR (r.codigo = 'ENFERMERIA' AND p.codigo IN ('farmacia.alertas.ver','camas.ver','hc.ver_notas',
                                              'hc.acceso_emergencia','dispensacion.registrar','dosis.registrar'))
   OR (r.codigo = 'PACIENTE' AND p.codigo IN ('portal.propio'));
+
+-- Versión del esquema: si una clinico.db vieja tiene otra, se respalda y se recrea (pharmacy_service)
+PRAGMA user_version = 2;
