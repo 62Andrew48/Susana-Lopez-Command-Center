@@ -58,3 +58,9 @@ desktop.ini
 
 # --- Registros -----------------------------------------------------------------
 *.log
+
+# --- Reglas Microservicios ---
+microservicios/**/*.joblib
+microservicios/**/*.pkl
+microservicios/**/*.xlsx
+*.xlsx
